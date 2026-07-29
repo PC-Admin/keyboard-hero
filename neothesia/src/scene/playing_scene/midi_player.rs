@@ -240,8 +240,10 @@ type NoteId = u8;
 /// Result of a play-along key press, consumed by the visual effects system.
 #[derive(Debug, Clone, Copy)]
 pub enum HitKind {
-    /// User played a required note correctly (in time).
-    Good,
+    /// User played a required note correctly (in time). `delta` is the gap
+    /// between the file note and the user press (early or late) — smaller is
+    /// more accurate.
+    Good { delta: Duration },
     /// User played a note that the song did not ask for (expired unmatched).
     Wrong,
 }
@@ -362,12 +364,11 @@ impl PlayAlong {
         if active {
             // Check if note has already been played by a file
             if let Some(required_press) = self.required_notes.remove(&note_id) {
-                self.stats
-                    .played_late
-                    .push(timestamp.duration_since(required_press.timestamp));
+                let delta = timestamp.duration_since(required_press.timestamp);
+                self.stats.played_late.push(delta);
                 self.hit_events.push(HitEvent {
                     note_id,
-                    kind: HitKind::Good,
+                    kind: HitKind::Good { delta },
                 });
             } else {
                 // This note was not played by file yet, place it in recents
@@ -388,12 +389,11 @@ impl PlayAlong {
         if active {
             // Check if note got pressed earlier 500ms (user_pressed_recently)
             if let Some(press) = self.user_pressed_recently.remove(&note_id) {
-                self.stats
-                    .played_early
-                    .push(timestamp.duration_since(press.timestamp));
+                let delta = timestamp.duration_since(press.timestamp);
+                self.stats.played_early.push(delta);
                 self.hit_events.push(HitEvent {
                     note_id,
-                    kind: HitKind::Good,
+                    kind: HitKind::Good { delta },
                 });
             } else {
                 // Player never pressed that note, let it reach required_notes

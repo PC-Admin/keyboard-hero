@@ -183,8 +183,14 @@ impl PlayingScene {
             let cx = pos.x + key.x() + key.width() / 2.0;
 
             match e.kind {
-                HitKind::Good => {
-                    self.effects.good_hit(e.note_id, cx, hit_line_y, neutral_w);
+                HitKind::Good { delta } => {
+                    self.effects.good_hit(
+                        e.note_id,
+                        cx,
+                        hit_line_y,
+                        neutral_w,
+                        delta.as_secs_f32(),
+                    );
 
                     // Find the note bar being struck (the one crossing the hit
                     // line on this key right now) and light it up.
@@ -220,8 +226,82 @@ impl PlayingScene {
         self.effects.update(dt, hit_line_y, pos.x, board_width);
     }
 
-    /// Guitar-Hero combo / multiplier counter above the keyboard.
-    fn update_combo_hud(&mut self, ctx: &Context) {
+    /// Guitar-Hero HUD: top-left streak counter + audience sentiment, rising
+    /// PERFECT/GOOD grades out of the keys, and the pulsing combo counter.
+    fn update_hud(&mut self, ctx: &Context) {
+        // --- top-left streak counter + audience emoji -----------------------
+        if self.effects.has_activity() {
+            let on_fire = self.effects.on_fire();
+            let streak_color = if on_fire {
+                nuon::Color::new_u8(255, 150, 40, 1.0)
+            } else {
+                nuon::Color::new_u8(255, 255, 255, 1.0)
+            };
+
+            nuon::label()
+                .text(format!("{}", self.effects.combo()))
+                .font_size(36.0)
+                .color(streak_color)
+                .bold(true)
+                .text_justify(nuon::TextJustify::Left)
+                .pos(16.0, 10.0)
+                .size(120.0, 36.0)
+                .build(&mut self.nuon);
+
+            nuon::label()
+                .text("STREAK")
+                .font_size(12.0)
+                .color(nuon::Color::new_u8(190, 190, 190, 1.0))
+                .text_justify(nuon::TextJustify::Left)
+                .pos(16.0, 48.0)
+                .size(120.0, 12.0)
+                .build(&mut self.nuon);
+
+            nuon::label()
+                .text(format!("BEST {}", self.effects.best_combo()))
+                .font_size(12.0)
+                .color(nuon::Color::new_u8(150, 150, 150, 1.0))
+                .text_justify(nuon::TextJustify::Left)
+                .pos(16.0, 66.0)
+                .size(160.0, 12.0)
+                .build(&mut self.nuon);
+
+            // The audience weighs in: emoji + speedometer-style dial.
+            if let Some(emoji) = self.effects.sentiment_emoji() {
+                nuon::label()
+                    .text(emoji)
+                    .font_size(34.0)
+                    .text_justify(nuon::TextJustify::Left)
+                    .pos(110.0, 12.0)
+                    .size(50.0, 40.0)
+                    .build(&mut self.nuon);
+
+                self.effects
+                    .render_sentiment_dial(&mut self.quad_renderer_fg, 210.0, 52.0, 28.0);
+            }
+        }
+
+        // --- PERFECT / GOOD rising out of the keys --------------------------
+        for r in self.effects.rising_texts() {
+            let color = if r.perfect {
+                nuon::Color::new_u8(255, 222, 84, r.alpha())
+            } else {
+                nuon::Color::new_u8(196, 255, 196, r.alpha())
+            };
+
+            let size = r.font_size();
+            nuon::label()
+                .text(r.text())
+                .font_size(size)
+                .color(color)
+                .bold(r.perfect)
+                .x(r.x() - 90.0)
+                .y(r.y())
+                .size(180.0, size)
+                .build(&mut self.nuon);
+        }
+
+        // --- centre combo pulse ---------------------------------------------
         let combo = self.effects.combo();
         if combo < 2 {
             return;
@@ -361,7 +441,7 @@ impl Scene for PlayingScene {
             ctx.config.animation_speed() / ctx.window_state.scale_factor as f32,
             self.keyboard.pos().y,
         );
-        self.update_combo_hud(ctx);
+        self.update_hud(ctx);
 
         TopBar::update(self, ctx);
 

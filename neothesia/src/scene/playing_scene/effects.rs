@@ -12,11 +12,18 @@
 //! dark background), so there is no extra GPU pipeline. Nothing fires unless a
 //! track is set to "Human", so ordinary auto-play is untouched.
 
+use std::collections::VecDeque;
+
 use neothesia_core::render::{QuadInstance, QuadRenderer};
 
 const GRAVITY: f32 = 1350.0;
 const MAX_PARTICLES: usize = 6000;
 const FIRE_COMBO: u32 = 15;
+/// How many recent notes the "audience" judges you on.
+const SENTIMENT_WINDOW: usize = 20;
+/// Hit-timing grades (seconds between the file note and your press).
+const PERFECT_WINDOW: f32 = 0.15;
+const GOOD_WINDOW: f32 = 0.35;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Style {
@@ -59,15 +66,57 @@ struct NoteFlash {
     color: [f32; 3],
 }
 
+/// "PERFECT!" / "GOOD" text rising out of the top of a struck key.
+pub struct RisingText {
+    x: f32,
+    /// Key top (hit line) — the text rises up from here.
+    y0: f32,
+    age: f32,
+    life: f32,
+    pub perfect: bool,
+}
+
+impl RisingText {
+    pub fn text(&self) -> &'static str {
+        if self.perfect { "PERFECT!" } else { "GOOD" }
+    }
+
+    pub fn x(&self) -> f32 {
+        self.x
+    }
+
+    pub fn y(&self) -> f32 {
+        let rise = if self.perfect { 110.0 } else { 80.0 };
+        self.y0 - 24.0 - self.age * rise
+    }
+
+    pub fn alpha(&self) -> f32 {
+        (1.0 - self.age / self.life).clamp(0.0, 1.0).powf(0.8)
+    }
+
+    pub fn font_size(&self) -> f32 {
+        let base = if self.perfect { 24.0 } else { 19.0 };
+        // Quick pop at birth.
+        base * (1.0 + 0.35 * (1.0 - (self.age * 6.0).min(1.0)))
+    }
+}
+
 pub struct EffectsSystem {
     particles: Vec<Particle>,
     note_flashes: Vec<NoteFlash>,
+    rising: Vec<RisingText>,
+    /// Rolling record of the last few notes: `true` = correct, `false` = wrong.
+    recent: VecDeque<bool>,
     rng: u64,
 
     combo: u32,
     best_combo: u32,
     combo_pop: f32,
     ember_acc: f32,
+
+    /// Smoothed 0..1 sentiment shown by the dial needle (eases toward the
+    /// rolling accuracy so it sweeps like a real gauge).
+    sentiment_display: f32,
 }
 
 impl EffectsSystem {
@@ -75,12 +124,31 @@ impl EffectsSystem {
         Self {
             particles: Vec::new(),
             note_flashes: Vec::new(),
+            rising: Vec::new(),
+            recent: VecDeque::new(),
             rng: 0x9E3779B97F4A7C15,
             combo: 0,
             best_combo: 0,
             combo_pop: 0.0,
             ember_acc: 0.0,
+            sentiment_display: 0.5,
         }
+    }
+
+    /// Rolling accuracy over the sentiment window, if anything was played.
+    fn accuracy(&self) -> Option<f32> {
+        if self.recent.is_empty() {
+            return None;
+        }
+        let good = self.recent.iter().filter(|g| **g).count() as f32;
+        Some(good / self.recent.len() as f32)
+    }
+
+    fn record_result(&mut self, good: bool) {
+        if self.recent.len() >= SENTIMENT_WINDOW {
+            self.recent.pop_front();
+        }
+        self.recent.push_back(good);
     }
 
     // --- tiny xorshift PRNG --------------------------------------------------
@@ -112,8 +180,7 @@ impl EffectsSystem {
         self.combo
     }
 
-    /// Longest streak this session (kept for a future results screen).
-    #[allow(unused)]
+    /// Longest streak this session.
     pub fn best_combo(&self) -> u32 {
         self.best_combo
     }
@@ -130,14 +197,61 @@ impl EffectsSystem {
         self.combo >= FIRE_COMBO
     }
 
+    /// True once the player has actually played something this song.
+    pub fn has_activity(&self) -> bool {
+        !self.recent.is_empty()
+    }
+
+    pub fn rising_texts(&self) -> impl Iterator<Item = &RisingText> {
+        self.rising.iter()
+    }
+
+    /// Audience sentiment over the last [`SENTIMENT_WINDOW`] notes:
+    /// angry when you're flubbing everything, star-struck when you're nailing
+    /// it. `None` until a few notes have been judged.
+    pub fn sentiment_emoji(&self) -> Option<&'static str> {
+        if self.recent.len() < 3 {
+            return None;
+        }
+
+        let accuracy = self.accuracy()?;
+
+        Some(if accuracy >= 0.95 && self.recent.len() >= 10 {
+            "🤩"
+        } else if accuracy >= 0.85 {
+            "😄"
+        } else if accuracy >= 0.7 {
+            "🙂"
+        } else if accuracy >= 0.5 {
+            "😐"
+        } else if accuracy >= 0.3 {
+            "🙁"
+        } else {
+            "😡"
+        })
+    }
+
     // --- event hooks ---------------------------------------------------------
 
     /// Correct note. `cx` = key centre, `y` = hit line (keyboard top, which is
-    /// also the height of the note lane above it), `key_w` = white-key width.
-    pub fn good_hit(&mut self, note_id: u8, cx: f32, y: f32, key_w: f32) {
+    /// also the height of the note lane above it), `key_w` = white-key width,
+    /// `delta_secs` = timing gap between the file note and the press.
+    pub fn good_hit(&mut self, note_id: u8, cx: f32, y: f32, key_w: f32, delta_secs: f32) {
         self.combo += 1;
         self.best_combo = self.best_combo.max(self.combo);
         self.combo_pop = 1.0;
+        self.record_result(true);
+
+        // Timing grade text rising out of the key.
+        if delta_secs <= GOOD_WINDOW {
+            self.rising.push(RisingText {
+                x: cx,
+                y0: y,
+                age: 0.0,
+                life: 0.9,
+                perfect: delta_secs <= PERFECT_WINDOW,
+            });
+        }
 
         let mult = self.multiplier() as f32;
         let base = note_linear_color(note_id);
@@ -258,6 +372,7 @@ impl EffectsSystem {
     pub fn wrong_hit(&mut self, cx: f32, y: f32) {
         self.combo = 0;
         self.combo_pop = 0.0;
+        self.record_result(false);
 
         for _ in 0..14 {
             if !self.room() {
@@ -293,6 +408,15 @@ impl EffectsSystem {
             f.life -= dt;
         }
         self.note_flashes.retain(|f| f.life > 0.0);
+
+        for r in &mut self.rising {
+            r.age += dt;
+        }
+        self.rising.retain(|r| r.age < r.life);
+
+        // Sweep the sentiment needle toward the rolling accuracy.
+        let target = self.accuracy().unwrap_or(0.5);
+        self.sentiment_display += (target - self.sentiment_display) * (dt * 3.0).min(1.0);
 
         // Tall ambient flames while on fire.
         if self.on_fire() {
@@ -404,6 +528,55 @@ impl EffectsSystem {
                 }
             }
         }
+    }
+
+    /// Speedometer-style sentiment dial: a semicircular arc of dots running
+    /// red (left, terrible) through yellow to green (right, brilliant), with
+    /// a needle sweeping to the smoothed audience sentiment.
+    pub fn render_sentiment_dial(&self, quads: &mut QuadRenderer, cx: f32, cy: f32, radius: f32) {
+        fn dot(quads: &mut QuadRenderer, x: f32, y: f32, d: f32, color: [f32; 3], a: f32) {
+            let half = d * 0.5;
+            quads.push(QuadInstance {
+                position: [x - half, y - half],
+                size: [d, d],
+                color: [color[0], color[1], color[2], a],
+                border_radius: [half, half, half, half],
+            });
+        }
+
+        fn gauge_color(t: f32) -> [f32; 3] {
+            let red = [0.70, 0.03, 0.03];
+            let yellow = [0.75, 0.58, 0.04];
+            let green = [0.06, 0.70, 0.10];
+            if t < 0.5 {
+                mix(red, yellow, t * 2.0)
+            } else {
+                mix(yellow, green, (t - 0.5) * 2.0)
+            }
+        }
+
+        // Arc: left (t=0) to right (t=1) over the top half.
+        const ARC_DOTS: usize = 24;
+        for i in 0..ARC_DOTS {
+            let t = i as f32 / (ARC_DOTS - 1) as f32;
+            let theta = std::f32::consts::PI * (1.0 - t);
+            let x = cx + theta.cos() * radius;
+            let y = cy - theta.sin() * radius;
+            dot(quads, x, y, 3.0, gauge_color(t), 0.9);
+        }
+
+        // Needle.
+        let val = self.sentiment_display.clamp(0.0, 1.0);
+        let theta = std::f32::consts::PI * (1.0 - val);
+        let (sin, cos) = (theta.sin(), theta.cos());
+        const NEEDLE_DOTS: usize = 8;
+        for i in 0..NEEDLE_DOTS {
+            let d = i as f32 / (NEEDLE_DOTS - 1) as f32 * (radius - 6.0);
+            dot(quads, cx + cos * d, cy - sin * d, 2.4, [0.9, 0.9, 0.9], 1.0);
+        }
+
+        // Hub.
+        dot(quads, cx, cy, 7.0, [0.8, 0.8, 0.8], 1.0);
     }
 
     /// Draw the sheen over correctly-struck note bars. Uses the same geometry
