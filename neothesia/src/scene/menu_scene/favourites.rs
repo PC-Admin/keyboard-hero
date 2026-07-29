@@ -1,13 +1,22 @@
-//! Favourites page: lists the .mid files in `~/Music/MIDI/Favourites` so a
-//! practice song is two clicks away. The folder is rescanned every time the
-//! page is opened and the list scrolls, so dropping more files in later just
-//! works.
+//! Inline favourites list on the main page.
+//!
+//! The .mid files in `~/Music/MIDI/Favourites` are listed right under the
+//! main menu buttons with one row highlighted. Arrow up/down moves the
+//! highlight and loads that song on the spot; Enter then starts it (the main
+//! page's existing play binding). Clicking a row does the same as
+//! highlighting it. The folder is rescanned whenever the menu is (re)opened,
+//! and the list shows however many rows fit — with the highlight kept in
+//! view — so it stays tidy no matter how many files get added.
 
 use std::path::PathBuf;
 
 use crate::{context::Context, song::Song};
 
-use super::{icons, neo_btn_icon, state::Page};
+pub const ROW_H: f32 = 30.0;
+pub const ROW_GAP: f32 = 4.0;
+const CAPTION_H: f32 = 18.0;
+/// Space kept free for the bottom bar (song title + play/freeplay buttons).
+const BOTTOM_RESERVED: f32 = 92.0;
 
 /// Collect and alphabetically sort the .mid/.midi files in the favourites dir.
 pub fn scan_favourites() -> Vec<PathBuf> {
@@ -41,136 +50,145 @@ pub fn scan_favourites() -> Vec<PathBuf> {
     files
 }
 
-/// One row in the favourites list. Returns true when clicked.
-fn song_row(ui: &mut nuon::Ui, w: f32, h: f32, id: &PathBuf, name: &str) -> bool {
-    let event = nuon::click_area(nuon::Id::hash(id)).size(w, h).build(ui);
-
-    let (bg, accent) = if event.is_hovered() || event.is_pressed() {
-        (
-            nuon::Color::new_u8(9, 9, 9, 0.6),
-            nuon::Color::new_u8(56, 145, 255, 1.0),
-        )
-    } else {
-        (
-            nuon::Color::new_u8(17, 17, 17, 0.6),
-            nuon::Color::new_u8(160, 81, 255, 1.0),
-        )
-    };
-
-    nuon::quad()
-        .size(w, h)
-        .color(bg)
-        .border_radius([7.0; 4])
-        .build(ui);
-    // Slim accent stripe on the left, echoing the main menu buttons.
-    nuon::quad()
-        .size(5.0, h)
-        .color(accent)
-        .border_radius([7.0, 0.0, 0.0, 7.0])
-        .build(ui);
-
-    nuon::label()
-        .text(name)
-        .font_size(20.0)
-        .text_justify(nuon::TextJustify::Left)
-        .x(18.0)
-        .size(w - 36.0, h)
-        .build(ui);
-
-    event.is_clicked()
-}
-
 impl super::MenuScene {
-    pub fn favourites_page_ui(&mut self, ctx: &mut Context, ui: &mut nuon::Ui) {
-        let win_w = ctx.window_state.logical_size.width;
-        let win_h = ctx.window_state.logical_size.height;
-        let bottom_bar_h = 60.0;
+    /// Draw the list at the current translate origin (directly under the Exit
+    /// button). `list_top` is that origin's absolute y, used to work out how
+    /// many rows fit above the bottom bar.
+    pub fn favourites_list_ui(
+        &mut self,
+        ctx: &mut Context,
+        ui: &mut nuon::Ui,
+        w: f32,
+        list_top: f32,
+        win_h: f32,
+    ) {
+        let count = self.favourites.len();
 
-        // Bottom bar: back button, like the tracks page.
-        nuon::translate().x(0.0).y(win_h).build(ui, |ui| {
-            nuon::translate().y(-10.0).add_to_current(ui);
-            nuon::translate().y(-bottom_bar_h).add_to_current(ui);
+        let caption = if count == 0 {
+            "FAVOURITES — none in ~/Music/MIDI/Favourites".to_string()
+        } else {
+            format!("FAVOURITES — {count} songs · arrows + Enter")
+        };
+        nuon::label()
+            .text(caption)
+            .font_size(11.0)
+            .color(nuon::Color::new_u8(150, 150, 150, 1.0))
+            .text_justify(nuon::TextJustify::Left)
+            .x(4.0)
+            .size(w - 8.0, 12.0)
+            .build(ui);
 
-            nuon::translate().x(10.0).add_to_current(ui);
-            if neo_btn_icon(ui, 80.0, bottom_bar_h, icons::left_arrow_icon()) {
-                self.state.go_back();
+        if count == 0 {
+            return;
+        }
+
+        nuon::translate().y(CAPTION_H).add_to_current(ui);
+
+        // However many rows fit between the caption and the bottom bar.
+        let avail = win_h - BOTTOM_RESERVED - list_top - CAPTION_H;
+        let visible = (((avail + ROW_GAP) / (ROW_H + ROW_GAP)).floor().max(1.0) as usize).min(count);
+
+        // Keep the highlighted row inside the visible window.
+        if self.fav_selected >= count {
+            self.fav_selected = count - 1;
+        }
+        if self.fav_selected < self.fav_scroll_top {
+            self.fav_scroll_top = self.fav_selected;
+        }
+        if self.fav_selected >= self.fav_scroll_top + visible {
+            self.fav_scroll_top = self.fav_selected + 1 - visible;
+        }
+        self.fav_scroll_top = self.fav_scroll_top.min(count - visible);
+
+        let mut clicked: Option<usize> = None;
+        let end = (self.fav_scroll_top + visible).min(count);
+
+        for idx in self.fav_scroll_top..end {
+            let path = &self.favourites[idx];
+            let name = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("(unreadable name)");
+            let selected = idx == self.fav_selected;
+
+            let event = nuon::click_area(nuon::Id::hash(path)).size(w, ROW_H).build(ui);
+            if event.is_clicked() {
+                clicked = Some(idx);
             }
-        });
+            let hovered = event.is_hovered() || event.is_pressed();
 
-        let mut clicked: Option<PathBuf> = None;
+            let bg = if selected {
+                nuon::Color::new_u8(56, 145, 255, 0.85)
+            } else if hovered {
+                nuon::Color::new_u8(60, 60, 60, 0.6)
+            } else {
+                nuon::Color::new_u8(17, 17, 17, 0.55)
+            };
+            nuon::quad()
+                .size(w, ROW_H)
+                .color(bg)
+                .border_radius([5.0; 4])
+                .build(ui);
 
-        self.favourites_scroll = nuon::scroll()
-            .scissor_size(win_w, (win_h - bottom_bar_h - 20.0).max(0.0))
-            .scroll(self.favourites_scroll)
-            .build(ui, |ui| {
-                nuon::translate().y(30.0).add_to_current(ui);
-
-                nuon::label()
-                    .text("Favourites")
-                    .font_size(30.0)
-                    .size(win_w, 34.0)
+            if selected {
+                nuon::quad()
+                    .size(5.0, ROW_H)
+                    .color(nuon::Color::new_u8(160, 81, 255, 1.0))
+                    .border_radius([5.0, 0.0, 0.0, 5.0])
                     .build(ui);
-                nuon::label()
-                    .text("~/Music/MIDI/Favourites")
-                    .font_size(13.0)
-                    .color(nuon::Color::new_u8(150, 150, 150, 1.0))
-                    .y(38.0)
-                    .size(win_w, 14.0)
-                    .build(ui);
-
-                nuon::translate().y(80.0).add_to_current(ui);
-
-                if self.favourites.is_empty() {
-                    nuon::label()
-                        .text("No .mid files found — drop some into the folder!")
-                        .font_size(18.0)
-                        .color(nuon::Color::new_u8(170, 170, 170, 1.0))
-                        .size(win_w, 20.0)
-                        .build(ui);
-                    return;
-                }
-
-                let item_w = 560.0f32.min(win_w - 40.0);
-                let item_h = 52.0;
-                let gap = 8.0;
-
-                nuon::translate()
-                    .x(nuon::center_x(win_w, item_w))
-                    .build(ui, |ui| {
-                        for path in &self.favourites {
-                            let name = path
-                                .file_stem()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or("(unreadable name)");
-
-                            if song_row(ui, item_w, item_h, path, name) {
-                                clicked = Some(path.clone());
-                            }
-
-                            nuon::translate().y(item_h + gap).add_to_current(ui);
-                        }
-                    });
-            });
-
-        if let Some(path) = clicked {
-            match midi_file::MidiFile::new(&path) {
-                Ok(midi) => {
-                    ctx.config.set_last_opened_song(Some(path));
-                    self.state.song = Some(Song::new(midi));
-                    // Back to the main page with the song loaded, ready to play.
-                    self.state.go_back();
-                }
-                Err(e) => {
-                    log::error!("failed to load favourite: {e}");
-                }
             }
+
+            let text_color = if selected {
+                nuon::Color::new_u8(255, 255, 255, 1.0)
+            } else {
+                nuon::Color::new_u8(205, 205, 205, 1.0)
+            };
+            nuon::label()
+                .text(name)
+                .font_size(16.0)
+                .color(text_color)
+                .text_justify(nuon::TextJustify::Left)
+                .x(14.0)
+                .size(w - 28.0, ROW_H)
+                .build(ui);
+
+            nuon::translate().y(ROW_H + ROW_GAP).add_to_current(ui);
+        }
+
+        if let Some(idx) = clicked {
+            self.fav_selected = idx;
+            self.load_selected_favourite(ctx);
         }
     }
 
-    pub fn open_favourites(&mut self) {
-        // Rescan on every open so newly added files show up.
-        self.favourites = scan_favourites();
-        self.favourites_scroll = nuon::ScrollState::new();
-        self.state.go_to(Page::Favourites);
+    /// Arrow-key navigation: move the highlight and load that song.
+    pub fn favourites_move(&mut self, ctx: &mut Context, delta: i32) {
+        if self.favourites.is_empty() {
+            return;
+        }
+        let len = self.favourites.len() as i32;
+        let cur = self.fav_selected as i32;
+        let next = (cur + delta).clamp(0, len - 1);
+
+        if next != cur || self.state.song.is_none() {
+            self.fav_selected = next as usize;
+            self.load_selected_favourite(ctx);
+        }
+    }
+
+    pub fn load_selected_favourite(&mut self, ctx: &mut Context) {
+        let Some(path) = self.favourites.get(self.fav_selected) else {
+            return;
+        };
+
+        match midi_file::MidiFile::new(path) {
+            Ok(midi) => {
+                ctx.config.set_last_opened_song(Some(path.clone()));
+                self.state.song = Some(Song::new(midi));
+            }
+            Err(e) => {
+                log::error!("failed to load favourite: {e}");
+            }
+        }
     }
 }

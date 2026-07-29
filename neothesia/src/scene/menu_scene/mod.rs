@@ -76,8 +76,9 @@ pub struct MenuScene {
 
     tracks_scroll: nuon::ScrollState,
     settings_scroll: nuon::ScrollState,
-    favourites_scroll: nuon::ScrollState,
     favourites: Vec<std::path::PathBuf>,
+    fav_selected: usize,
+    fav_scroll_top: usize,
     popup: Popup,
 }
 
@@ -97,7 +98,17 @@ impl MenuScene {
             logo,
         ));
 
-        Self {
+        // Rainbow-keys fork: scan the favourites folder up front and highlight
+        // the song opened last time, so boot -> Enter replays it and the
+        // arrows browse from there.
+        let favourites = favourites::scan_favourites();
+        let fav_selected = ctx
+            .config
+            .last_opened_song()
+            .and_then(|last| favourites.iter().position(|p| p == last))
+            .unwrap_or(0);
+
+        let mut scene = Self {
             bg_pipeline: BgPipeline::new(&ctx.gpu),
             text_renderer,
             state: iced_state,
@@ -112,10 +123,19 @@ impl MenuScene {
             nuon: nuon::Ui::new(),
             tracks_scroll: nuon::ScrollState::new(),
             settings_scroll: nuon::ScrollState::new(),
-            favourites_scroll: nuon::ScrollState::new(),
-            favourites: Vec::new(),
+            favourites,
+            fav_selected,
+            fav_scroll_top: 0,
             popup: Popup::None,
+        };
+
+        // Nothing loaded yet (fresh install / cleared config)? Load the
+        // highlighted favourite so Enter works immediately.
+        if scene.state.song.is_none() && !scene.favourites.is_empty() {
+            scene.load_selected_favourite(ctx);
         }
+
+        scene
     }
 
     fn main_ui(&mut self, ctx: &mut Context) {
@@ -139,7 +159,6 @@ impl MenuScene {
             Page::Main => self.main_page_ui(ctx, &mut nuon),
             Page::Settings => self.settings_page_ui(ctx, &mut nuon),
             Page::TrackSelection => self.tracks_page_ui(ctx, &mut nuon),
-            Page::Favourites => self.favourites_page_ui(ctx, &mut nuon),
         }
 
         self.nuon = nuon;
@@ -188,16 +207,20 @@ impl MenuScene {
         let win_h = ctx.window_state.logical_size.height;
 
         let w = 450.0;
-        let h = 80.0;
+        // A little slimmer than stock (80) to leave room for the favourites
+        // list below the menu.
+        let h = 56.0;
         let gap = 10.0;
 
         let logo_w = 650.0;
         let logo_h = 118.0;
-        let post_logo_gap = 40.0;
+        let post_logo_gap = 24.0;
+
+        let menu_top = win_h / 6.0;
 
         nuon::translate()
             .x(win_w / 2.0)
-            .y(win_h / 5.0)
+            .y(menu_top)
             .build(ui, |ui| {
                 nuon::image(self.logo)
                     .x(-logo_w / 2.0)
@@ -214,12 +237,6 @@ impl MenuScene {
 
                         nuon::translate().y(h + gap).add_to_current(ui);
 
-                        if neo_btn().size(w, h).label("Favourites").build(ui) {
-                            self.open_favourites();
-                        }
-
-                        nuon::translate().y(h + gap).add_to_current(ui);
-
                         if neo_btn().size(w, h).label("Settings").build(ui) {
                             self.state.go_to(Page::Settings);
                         }
@@ -229,6 +246,11 @@ impl MenuScene {
                         if neo_btn().size(w, h).label("Exit").build(ui) {
                             self.state.go_back();
                         }
+
+                        nuon::translate().y(h + gap + 6.0).add_to_current(ui);
+
+                        let list_top = menu_top + logo_h + post_logo_gap + 3.0 * (h + gap) + 6.0;
+                        self.favourites_list_ui(ctx, ui, w, list_top, win_h);
                     });
             });
 
@@ -337,12 +359,10 @@ impl Scene for MenuScene {
                     let y = y * 60.0;
                     self.settings_scroll.update(y);
                     self.tracks_scroll.update(y);
-                    self.favourites_scroll.update(y);
                 }
                 winit::event::MouseScrollDelta::PixelDelta(position) => {
                     self.settings_scroll.update(position.y as f32);
                     self.tracks_scroll.update(position.y as f32);
-                    self.favourites_scroll.update(position.y as f32);
                 }
             }
         }
@@ -375,6 +395,14 @@ impl Scene for MenuScene {
                     self.futures.push(open_midi_file_picker(&mut self.state));
                 }
 
+                if event.key_pressed(Key::Named(NamedKey::ArrowUp)) {
+                    self.favourites_move(ctx, -1);
+                }
+
+                if event.key_pressed(Key::Named(NamedKey::ArrowDown)) {
+                    self.favourites_move(ctx, 1);
+                }
+
                 if event.key_pressed(Key::Named(NamedKey::Enter)) {
                     state::play(&self.state, ctx)
                 }
@@ -396,11 +424,6 @@ impl Scene for MenuScene {
                 }
             }
             Page::Settings => {
-                if event.key_pressed(Key::Named(NamedKey::Escape)) {
-                    self.state.go_back();
-                }
-            }
-            Page::Favourites => {
                 if event.key_pressed(Key::Named(NamedKey::Escape)) {
                     self.state.go_back();
                 }

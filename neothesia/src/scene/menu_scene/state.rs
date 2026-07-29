@@ -105,7 +105,6 @@ pub enum Page {
     Main,
     Settings,
     TrackSelection,
-    Favourites,
 }
 
 fn connect_io(data: &UiState, ctx: &mut Context) {
