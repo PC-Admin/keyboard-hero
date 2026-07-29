@@ -30,6 +30,38 @@ fn rainbow_color(note_id: u8) -> Option<Color> {
     Some(Color::from_rgba8(r, g, b, 1.0))
 }
 
+/// The note letter drawn inside the rainbow square, or `None` for keys that
+/// don't get a square.
+fn rainbow_letter(note_id: u8) -> Option<&'static str> {
+    Some(match note_id {
+        0 => "C",
+        2 => "D",
+        4 => "E",
+        5 => "F",
+        7 => "G",
+        9 => "A",
+        11 => "B",
+        _ => return None,
+    })
+}
+
+/// Geometry of the rainbow square for a white key: (color, x, y, side).
+/// Returns `None` for keys that don't get a square.
+fn rainbow_square(key: &piano_layout::Key, pos: Point<f32>) -> Option<(Color, f32, f32, f32)> {
+    let color = rainbow_color(key.note_id())?;
+
+    // Visual white-key width matches `to_quad` (which trims 1px).
+    let key_w = key.width() - 1.0;
+    let side = key_w * 0.7;
+
+    let x = pos.x + key.x() + (key_w - side) / 2.0;
+    // Center the square ~72% down the key, keeping it clear of both the black
+    // keys above and the octave labels at the very bottom.
+    let y = pos.y + key.height() * 0.72 - side / 2.0;
+
+    Some((color, x, y, side))
+}
+
 pub struct KeyboardRenderer {
     pos: Point<f32>,
 
@@ -152,18 +184,9 @@ impl KeyboardRenderer {
             .iter()
             .filter(|key| key.kind().is_neutral())
         {
-            let Some(color) = rainbow_color(key.note_id()) else {
+            let Some((color, x, y, side)) = rainbow_square(key, self.pos) else {
                 continue;
             };
-
-            // Visual white-key width matches `to_quad` (which trims 1px).
-            let key_w = key.width() - 1.0;
-            let side = key_w * 0.7;
-
-            let x = self.pos.x + key.x() + (key_w - side) / 2.0;
-            // Center the square ~72% down the key, keeping it clear of both the
-            // black keys above and the octave labels at the very bottom.
-            let y = self.pos.y + key.height() * 0.72 - side / 2.0;
 
             let r = side * 0.15;
 
@@ -223,6 +246,50 @@ impl KeyboardRenderer {
                     bottom: y.round() as i32 + h.round() as i32,
                 },
                 default_color: glyphon::Color::rgba(0, 0, 0, 150),
+            });
+        }
+
+        // Note letter centered inside each rainbow square. White reads best on
+        // most of the squares; the light yellow (E) and pink (B) get dark text.
+        for key in self.layout.keys.iter().filter(|key| key.kind().is_neutral()) {
+            let Some((_, sx, sy, side)) = rainbow_square(key, self.pos) else {
+                continue;
+            };
+            let Some(letter) = rainbow_letter(key.note_id()) else {
+                continue;
+            };
+
+            let font_size = side * 0.72;
+
+            let mut buffer =
+                glyphon::Buffer::new(font_system, glyphon::Metrics::new(font_size, font_size));
+            buffer.set_size(Some(side), Some(side));
+            buffer.set_wrap(glyphon::Wrap::None);
+            buffer.set_text(
+                letter,
+                &glyphon::Attrs::new().family(glyphon::Family::SansSerif),
+                glyphon::Shaping::Basic,
+                Some(glyphon::cosmic_text::Align::Center),
+            );
+            buffer.shape_until_scroll(font_system, false);
+
+            let text_color = match key.note_id() {
+                4 | 11 => glyphon::Color::rgba(20, 20, 20, 255), // E (yellow), B (pink)
+                _ => glyphon::Color::rgba(255, 255, 255, 255),
+            };
+
+            self.text_cache.push(super::text::TextArea {
+                buffer,
+                left: sx,
+                top: sy + (side - font_size) / 2.0 - font_size * 0.08,
+                scale: 1.0,
+                bounds: glyphon::TextBounds {
+                    left: sx.round() as i32,
+                    top: sy.round() as i32,
+                    right: sx.round() as i32 + side.round() as i32,
+                    bottom: sy.round() as i32 + side.round() as i32,
+                },
+                default_color: text_color,
             });
         }
     }
