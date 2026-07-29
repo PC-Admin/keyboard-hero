@@ -10,6 +10,26 @@ pub use key_state::KeyState;
 
 use super::TextRenderer;
 
+use wgpu_jumpstart::Color;
+
+/// Rainbow note-guide square color for a white (neutral) key, keyed by its
+/// note within the octave. Returns `None` for notes that don't get a square.
+///
+/// C=Red, D=Orange, E=Yellow, F=Green, G=Blue, A=Purple, B=Pink
+fn rainbow_color(note_id: u8) -> Option<Color> {
+    let (r, g, b) = match note_id {
+        0 => (230, 30, 30),    // C - Red
+        2 => (255, 140, 0),    // D - Orange
+        4 => (255, 215, 0),    // E - Yellow
+        5 => (40, 190, 60),    // F - Green
+        7 => (40, 90, 230),    // G - Blue
+        9 => (150, 60, 210),   // A - Purple
+        11 => (255, 105, 180), // B - Pink
+        _ => return None,
+    };
+    Some(Color::from_rgba8(r, g, b, 1.0))
+}
+
 pub struct KeyboardRenderer {
     pos: Point<f32>,
 
@@ -121,6 +141,38 @@ impl KeyboardRenderer {
             let color = self.key_states[id].color();
 
             instances.push(key_state::to_quad(key, color, self.pos));
+        }
+
+        // Rainbow note-guide squares on the white keys.
+        // A small square (~70% of the key width) sits in the lower playing area
+        // of each white key, below where the black keys reach.
+        for key in self
+            .layout
+            .keys
+            .iter()
+            .filter(|key| key.kind().is_neutral())
+        {
+            let Some(color) = rainbow_color(key.note_id()) else {
+                continue;
+            };
+
+            // Visual white-key width matches `to_quad` (which trims 1px).
+            let key_w = key.width() - 1.0;
+            let side = key_w * 0.7;
+
+            let x = self.pos.x + key.x() + (key_w - side) / 2.0;
+            // Center the square ~72% down the key, keeping it clear of both the
+            // black keys above and the octave labels at the very bottom.
+            let y = self.pos.y + key.height() * 0.72 - side / 2.0;
+
+            let r = side * 0.15;
+
+            instances.push(QuadInstance {
+                position: [x, y],
+                size: [side, side],
+                color: color.into_linear_rgba(),
+                border_radius: [r, r, r, r],
+            });
         }
 
         for key in self.layout.keys.iter().filter(|key| key.kind().is_sharp()) {
