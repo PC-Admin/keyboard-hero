@@ -8,6 +8,7 @@ use midi_picker::open_midi_file_picker;
 mod neo_btn;
 use neo_btn::{neo_btn, neo_btn_icon};
 
+mod favourites;
 mod settings;
 mod tracks;
 
@@ -75,6 +76,8 @@ pub struct MenuScene {
 
     tracks_scroll: nuon::ScrollState,
     settings_scroll: nuon::ScrollState,
+    favourites_scroll: nuon::ScrollState,
+    favourites: Vec<std::path::PathBuf>,
     popup: Popup,
 }
 
@@ -109,6 +112,8 @@ impl MenuScene {
             nuon: nuon::Ui::new(),
             tracks_scroll: nuon::ScrollState::new(),
             settings_scroll: nuon::ScrollState::new(),
+            favourites_scroll: nuon::ScrollState::new(),
+            favourites: Vec::new(),
             popup: Popup::None,
         }
     }
@@ -134,6 +139,7 @@ impl MenuScene {
             Page::Main => self.main_page_ui(ctx, &mut nuon),
             Page::Settings => self.settings_page_ui(ctx, &mut nuon),
             Page::TrackSelection => self.tracks_page_ui(ctx, &mut nuon),
+            Page::Favourites => self.favourites_page_ui(ctx, &mut nuon),
         }
 
         self.nuon = nuon;
@@ -204,6 +210,12 @@ impl MenuScene {
                     .build(ui, |ui| {
                         if neo_btn().size(w, h).label("Select File").build(ui) {
                             self.futures.push(open_midi_file_picker(&mut self.state));
+                        }
+
+                        nuon::translate().y(h + gap).add_to_current(ui);
+
+                        if neo_btn().size(w, h).label("Favourites").build(ui) {
+                            self.open_favourites();
                         }
 
                         nuon::translate().y(h + gap).add_to_current(ui);
@@ -325,10 +337,12 @@ impl Scene for MenuScene {
                     let y = y * 60.0;
                     self.settings_scroll.update(y);
                     self.tracks_scroll.update(y);
+                    self.favourites_scroll.update(y);
                 }
                 winit::event::MouseScrollDelta::PixelDelta(position) => {
                     self.settings_scroll.update(position.y as f32);
                     self.tracks_scroll.update(position.y as f32);
+                    self.favourites_scroll.update(position.y as f32);
                 }
             }
         }
@@ -382,6 +396,11 @@ impl Scene for MenuScene {
                 }
             }
             Page::Settings => {
+                if event.key_pressed(Key::Named(NamedKey::Escape)) {
+                    self.state.go_back();
+                }
+            }
+            Page::Favourites => {
                 if event.key_pressed(Key::Named(NamedKey::Escape)) {
                     self.state.go_back();
                 }
