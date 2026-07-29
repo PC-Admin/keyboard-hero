@@ -30,6 +30,10 @@ impl NoteList {
     fn len(&self) -> usize {
         self.inner.len()
     }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, MidiNote> {
+        self.inner.iter()
+    }
 }
 
 pub struct WaterfallRenderer {

@@ -44,31 +44,42 @@ struct Particle {
     style: Style,
 }
 
+/// A falling note bar that was struck correctly and is currently lit up.
+/// Geometry is kept in song-time coordinates and converted to screen space
+/// every frame with the same math as the waterfall shader.
+struct NoteFlash {
+    x: f32,
+    w: f32,
+    /// Note start, in song seconds.
+    start: f32,
+    /// Bar height in seconds (matches the waterfall instance: max(dur,0.1)-0.01).
+    h: f32,
+    life: f32,
+    max_life: f32,
+    color: [f32; 3],
+}
+
 pub struct EffectsSystem {
     particles: Vec<Particle>,
+    note_flashes: Vec<NoteFlash>,
     rng: u64,
 
     combo: u32,
     best_combo: u32,
     combo_pop: f32,
     ember_acc: f32,
-
-    /// Full-screen flash timer (milestones / wrong notes) and its colour.
-    screen_flash: f32,
-    screen_flash_color: [f32; 3],
 }
 
 impl EffectsSystem {
     pub fn new() -> Self {
         Self {
             particles: Vec::new(),
+            note_flashes: Vec::new(),
             rng: 0x9E3779B97F4A7C15,
             combo: 0,
             best_combo: 0,
             combo_pop: 0.0,
             ember_acc: 0.0,
-            screen_flash: 0.0,
-            screen_flash_color: [1.0, 1.0, 1.0],
         }
     }
 
@@ -101,6 +112,8 @@ impl EffectsSystem {
         self.combo
     }
 
+    /// Longest streak this session (kept for a future results screen).
+    #[allow(unused)]
     pub fn best_combo(&self) -> u32 {
         self.best_combo
     }
@@ -129,19 +142,18 @@ impl EffectsSystem {
         let mult = self.multiplier() as f32;
         let base = note_linear_color(note_id);
         let milestone = self.combo % 10 == 0;
-        let fire = self.on_fire();
 
-        // 1) Light pillar up the note lane.
+        // 1) Soft light pillar up the note lane.
         if self.room() {
-            let lane = (y * 0.92).clamp(120.0, 1100.0);
+            let lane = (y * 0.8).clamp(120.0, 900.0);
             self.particles.push(Particle {
                 x: cx,
                 y,
                 vx: 0.0,
                 vy: 0.0,
-                life: if milestone { 0.5 } else { 0.36 },
-                max_life: if milestone { 0.5 } else { 0.36 },
-                size: key_w * if milestone { 1.5 } else { 1.05 },
+                life: if milestone { 0.45 } else { 0.32 },
+                max_life: if milestone { 0.45 } else { 0.32 },
+                size: key_w * if milestone { 1.1 } else { 0.8 },
                 length: lane,
                 color: mix(base, [2.0, 2.0, 1.9], 0.5),
                 gravity: 0.0,
@@ -196,11 +208,8 @@ impl EffectsSystem {
             });
         }
 
-        // 4) Milestone: aerial firework partway up the lane + screen flash.
+        // 4) Milestone: aerial firework partway up the lane.
         if milestone {
-            self.screen_flash = 1.0;
-            self.screen_flash_color = if fire { [1.9, 0.7, 0.15] } else { [1.4, 1.5, 2.0] };
-
             let burst_y = (y * 0.45).max(60.0);
             for _ in 0..90 {
                 if !self.room() {
@@ -229,12 +238,26 @@ impl EffectsSystem {
         }
     }
 
-    /// Wrong note: break the combo, grey puff, brief red screen flash.
+    /// Note bar struck correctly: light it up. `x`/`w` are the key's logical
+    /// x/width; `start_secs`/`dur_secs` come from the matched MIDI note.
+    pub fn note_struck(&mut self, note_id: u8, x: f32, w: f32, start_secs: f32, dur_secs: f32) {
+        let base = note_linear_color(note_id);
+        let life = dur_secs.clamp(0.45, 1.4);
+        self.note_flashes.push(NoteFlash {
+            x,
+            w,
+            start: start_secs,
+            h: dur_secs.max(0.1) - 0.01,
+            life,
+            max_life: life,
+            color: mix(base, [2.0, 2.0, 1.9], 0.75),
+        });
+    }
+
+    /// Wrong note: break the combo and drop a small dark puff at the key.
     pub fn wrong_hit(&mut self, cx: f32, y: f32) {
         self.combo = 0;
         self.combo_pop = 0.0;
-        self.screen_flash = self.screen_flash.max(0.5);
-        self.screen_flash_color = [0.7, 0.05, 0.05];
 
         for _ in 0..14 {
             if !self.room() {
@@ -265,7 +288,11 @@ impl EffectsSystem {
 
     pub fn update(&mut self, dt: f32, hit_line_y: f32, board_left: f32, board_width: f32) {
         self.combo_pop = (self.combo_pop - dt * 4.0).max(0.0);
-        self.screen_flash = (self.screen_flash - dt * 3.2).max(0.0);
+
+        for f in &mut self.note_flashes {
+            f.life -= dt;
+        }
+        self.note_flashes.retain(|f| f.life > 0.0);
 
         // Tall ambient flames while on fire.
         if self.on_fire() {
@@ -379,19 +406,47 @@ impl EffectsSystem {
         }
     }
 
-    /// Full-screen colour flash for milestones / wrong notes.
-    pub fn render_screen_flash(&self, quads: &mut QuadRenderer, win_w: f32, win_h: f32) {
-        if self.screen_flash <= 0.001 {
-            return;
+    /// Draw the sheen over correctly-struck note bars. Uses the same geometry
+    /// as the waterfall vertex shader: `speed` and `keyboard_y` in logical
+    /// coordinates, `time` the same value the waterfall was updated with.
+    pub fn render_note_flashes(
+        &self,
+        quads: &mut QuadRenderer,
+        time: f32,
+        speed: f32,
+        keyboard_y: f32,
+    ) {
+        for f in &self.note_flashes {
+            let t = (f.life / f.max_life).clamp(0.0, 1.0);
+
+            let bar_h = f.h * speed.abs();
+            let mut y = keyboard_y;
+            if speed > 0.0 {
+                y -= bar_h;
+            }
+            y -= (f.start - time) * speed;
+
+            // Clip to the lane so the sheen never covers the keyboard.
+            let bottom = (y + bar_h).min(keyboard_y);
+            let h_vis = bottom - y;
+            if h_vis <= 1.0 {
+                continue;
+            }
+
+            // Bright pop that settles into a gentle shimmer while the bar
+            // finishes crossing the line.
+            let age = f.max_life - f.life;
+            let shimmer = 0.5 + 0.5 * (age * 16.0).sin();
+            let a = t.powf(0.7) * (0.38 + 0.18 * shimmer);
+
+            let r = (f.w * 0.2).min(h_vis * 0.5);
+            quads.push(QuadInstance {
+                position: [f.x, y],
+                size: [f.w, h_vis],
+                color: [f.color[0], f.color[1], f.color[2], a],
+                border_radius: [r, r, r, r],
+            });
         }
-        let [r, g, b] = self.screen_flash_color;
-        let a = self.screen_flash * self.screen_flash * 0.28;
-        quads.push(QuadInstance {
-            position: [0.0, 0.0],
-            size: [win_w, win_h],
-            color: [r, g, b, a],
-            border_radius: [0.0; 4],
-        });
     }
 }
 

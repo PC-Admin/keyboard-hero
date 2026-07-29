@@ -166,7 +166,8 @@ impl PlayingScene {
     }
 
     /// Spawn Guitar-Hero sparks for hit events and advance the particle sim.
-    fn update_effects(&mut self, delta: Duration) {
+    /// `time` is the same waterfall time computed in [`Self::update`].
+    fn update_effects(&mut self, delta: Duration, time: f32) {
         let dt = delta.as_secs_f32();
         let pos = *self.keyboard.pos();
         let neutral_w = self.keyboard.layout().sizing.neutral_width;
@@ -176,18 +177,42 @@ impl PlayingScene {
 
         for e in self.player.take_hit_events() {
             let id = e.note_id.wrapping_sub(range_start) as usize;
-            let Some(cx) = self
-                .keyboard
-                .layout()
-                .keys
-                .get(id)
-                .map(|k| pos.x + k.x() + k.width() / 2.0)
-            else {
+            let Some(key) = self.keyboard.layout().keys.get(id) else {
                 continue;
             };
+            let cx = pos.x + key.x() + key.width() / 2.0;
 
             match e.kind {
-                HitKind::Good => self.effects.good_hit(e.note_id, cx, hit_line_y, neutral_w),
+                HitKind::Good => {
+                    self.effects.good_hit(e.note_id, cx, hit_line_y, neutral_w);
+
+                    // Find the note bar being struck (the one crossing the hit
+                    // line on this key right now) and light it up.
+                    let struck = self
+                        .waterfall
+                        .notes()
+                        .iter()
+                        .filter(|n| n.note == e.note_id && n.channel != 9)
+                        .filter(|n| {
+                            n.start.as_secs_f32() <= time + 0.6
+                                && n.end.as_secs_f32() >= time - 0.15
+                        })
+                        .min_by(|a, b| {
+                            let da = (a.start.as_secs_f32() - time).abs();
+                            let db = (b.start.as_secs_f32() - time).abs();
+                            da.total_cmp(&db)
+                        });
+
+                    if let Some(n) = struck {
+                        self.effects.note_struck(
+                            e.note_id,
+                            pos.x + key.x(),
+                            key.width() - 1.0,
+                            n.start.as_secs_f32(),
+                            n.duration.as_secs_f32(),
+                        );
+                    }
+                }
                 HitKind::Wrong => self.effects.wrong_hit(cx, hit_line_y),
             }
         }
@@ -207,37 +232,22 @@ impl PlayingScene {
         let mult = self.effects.multiplier();
         let win_w = ctx.window_state.logical_size.width;
 
-        // Big and pulsing; grows further as the combo climbs.
+        // Pulses on each hit, grows gently with the streak.
         let grow = (combo as f32 / 50.0).min(1.0);
-        let font_size = 56.0 + pop * 48.0 + grow * 22.0;
-        let y = self.keyboard.pos().y - 170.0;
+        let font_size = 40.0 + pop * 22.0 + grow * 14.0;
+        let y = self.keyboard.pos().y - 150.0;
 
         // Colour ramps white -> gold -> blazing orange.
         let color = if on_fire {
-            nuon::Color::new_u8(255, 105, 25, 1.0)
+            nuon::Color::new_u8(255, 120, 35, 1.0)
         } else if combo >= 10 {
             nuon::Color::new_u8(255, 216, 74, 1.0)
         } else {
             nuon::Color::new_u8(255, 255, 255, 1.0)
         };
 
-        // Soft glow slab behind the text (rendered under the nuon layer).
-        let glow_h = font_size * 2.2;
-        let glow_a = 0.10 + pop * 0.22 + if on_fire { 0.12 } else { 0.0 };
-        let gc = if on_fire {
-            [1.4, 0.45, 0.06, glow_a]
-        } else {
-            [0.35, 0.5, 1.0, glow_a]
-        };
-        self.quad_renderer_fg.push(neothesia_core::render::QuadInstance {
-            position: [win_w * 0.5 - win_w * 0.35, y + font_size * 0.5 - glow_h * 0.5],
-            size: [win_w * 0.7, glow_h],
-            color: gc,
-            border_radius: [glow_h * 0.5; 4],
-        });
-
         nuon::label()
-            .text(format!("x{mult}     {combo} COMBO"))
+            .text(format!("x{mult}   {combo} COMBO"))
             .font_size(font_size)
             .color(color)
             .bold(true)
@@ -247,13 +257,13 @@ impl PlayingScene {
             .build(&mut self.nuon);
 
         if on_fire {
-            let fire_size = 30.0 + pop * 12.0;
+            let fire_size = 22.0 + pop * 6.0;
             nuon::label()
-                .text("- ON FIRE! -")
+                .text("ON FIRE!")
                 .font_size(fire_size)
                 .color(nuon::Color::new_u8(255, 170, 40, 1.0))
                 .bold(true)
-                .y(y - fire_size - 6.0)
+                .y(y - fire_size - 8.0)
                 .height(fire_size)
                 .width(win_w)
                 .build(&mut self.nuon);
@@ -343,12 +353,13 @@ impl Scene for PlayingScene {
 
         self.update_glow(delta);
 
-        self.update_effects(delta);
+        self.update_effects(delta, time);
         self.effects.render(&mut self.quad_renderer_fg);
-        self.effects.render_screen_flash(
+        self.effects.render_note_flashes(
             &mut self.quad_renderer_fg,
-            ctx.window_state.logical_size.width,
-            ctx.window_state.logical_size.height,
+            time,
+            ctx.config.animation_speed() / ctx.window_state.scale_factor as f32,
+            self.keyboard.pos().y,
         );
         self.update_combo_hud(ctx);
 
