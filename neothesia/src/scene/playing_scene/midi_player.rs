@@ -217,6 +217,16 @@ impl MidiPlayer {
         self.play_along.take_hit_events()
     }
 
+    /// True when at least one track is set to Human, i.e. play-along scoring
+    /// is meaningful.
+    pub fn has_human_track(&self) -> bool {
+        self.song
+            .config
+            .tracks
+            .iter()
+            .any(|t| matches!(t.player, PlayerConfig::Human))
+    }
+
     pub fn user_midi_event(&mut self, channel: u8, message: &MidiMessage) {
         self.output.midi_event(u4::new(channel), *message);
         self.play_along.midi_event(MidiEventSource::User, message);

@@ -206,10 +206,10 @@ impl EffectsSystem {
         self.rising.iter()
     }
 
-    /// Audience sentiment over the last [`SENTIMENT_WINDOW`] notes:
-    /// angry when you're flubbing everything, star-struck when you're nailing
-    /// it. `None` until a few notes have been judged.
-    pub fn sentiment_emoji(&self) -> Option<&'static str> {
+    /// Audience sentiment over the last [`SENTIMENT_WINDOW`] notes, as a level
+    /// 0..=5: 0 = angry, 2 = neutral, 4 = big smile, 5 = star-eyed grin.
+    /// `None` until a few notes have been judged.
+    pub fn sentiment_level(&self) -> Option<u8> {
         if self.recent.len() < 3 {
             return None;
         }
@@ -217,17 +217,17 @@ impl EffectsSystem {
         let accuracy = self.accuracy()?;
 
         Some(if accuracy >= 0.95 && self.recent.len() >= 10 {
-            "🤩"
+            5
         } else if accuracy >= 0.85 {
-            "😄"
+            4
         } else if accuracy >= 0.7 {
-            "🙂"
+            3
         } else if accuracy >= 0.5 {
-            "😐"
+            2
         } else if accuracy >= 0.3 {
-            "🙁"
+            1
         } else {
-            "😡"
+            0
         })
     }
 
@@ -534,16 +534,6 @@ impl EffectsSystem {
     /// red (left, terrible) through yellow to green (right, brilliant), with
     /// a needle sweeping to the smoothed audience sentiment.
     pub fn render_sentiment_dial(&self, quads: &mut QuadRenderer, cx: f32, cy: f32, radius: f32) {
-        fn dot(quads: &mut QuadRenderer, x: f32, y: f32, d: f32, color: [f32; 3], a: f32) {
-            let half = d * 0.5;
-            quads.push(QuadInstance {
-                position: [x - half, y - half],
-                size: [d, d],
-                color: [color[0], color[1], color[2], a],
-                border_radius: [half, half, half, half],
-            });
-        }
-
         fn gauge_color(t: f32) -> [f32; 3] {
             let red = [0.70, 0.03, 0.03];
             let yellow = [0.75, 0.58, 0.04];
@@ -577,6 +567,63 @@ impl EffectsSystem {
 
         // Hub.
         dot(quads, cx, cy, 7.0, [0.8, 0.8, 0.8], 1.0);
+    }
+
+    /// Audience face, drawn entirely from circles (no emoji font needed).
+    /// `level` is [`Self::sentiment_level`]: 0 angry .. 5 star-eyed grin.
+    pub fn render_sentiment_face(&self, quads: &mut QuadRenderer, cx: f32, cy: f32, level: u8) {
+        // Face disc: red when angry, orange when grumpy, classic yellow above.
+        let face = match level {
+            0 => [0.72, 0.08, 0.05],
+            1 => [0.78, 0.32, 0.05],
+            _ => [0.82, 0.62, 0.07],
+        };
+        dot(quads, cx, cy, 40.0, face, 1.0);
+
+        let dark = [0.05, 0.04, 0.03];
+
+        // Eyes: star sparkles at level 5, plain dots otherwise.
+        if level == 5 {
+            let gold = [1.3, 1.05, 0.25];
+            for sx in [-7.0f32, 7.0] {
+                let (ex, ey) = (cx + sx, cy - 4.5);
+                dot(quads, ex, ey, 5.0, gold, 1.0);
+                for (ox, oy) in [(0.0, -4.5), (0.0, 4.5), (-4.5, 0.0), (4.5, 0.0)] {
+                    dot(quads, ex + ox, ey + oy, 2.6, gold, 1.0);
+                }
+            }
+        } else {
+            for sx in [-7.0f32, 7.0] {
+                dot(quads, cx + sx, cy - 4.5, 5.0, dark, 1.0);
+            }
+        }
+
+        // Angry brows slanting in over the eyes.
+        if level == 0 {
+            for s in [-1.0f32, 1.0] {
+                dot(quads, cx + s * 10.5, cy - 12.5, 2.8, dark, 1.0);
+                dot(quads, cx + s * 7.5, cy - 11.0, 2.8, dark, 1.0);
+                dot(quads, cx + s * 4.5, cy - 9.5, 2.8, dark, 1.0);
+            }
+        }
+
+        // Mouth: an arc of dots. Positive `amp` bows the middle down (smile),
+        // negative bows it up (frown).
+        let (amp, base_y, d) = match level {
+            0 => (-4.5, cy + 11.0, 3.2),
+            1 => (-3.0, cy + 10.5, 3.0),
+            2 => (0.0, cy + 9.0, 3.0),
+            3 => (3.0, cy + 7.0, 3.0),
+            4 => (4.5, cy + 6.0, 3.6),
+            _ => (5.0, cy + 6.0, 3.8),
+        };
+        const MOUTH_DOTS: usize = 7;
+        for i in 0..MOUTH_DOTS {
+            let t = i as f32 / (MOUTH_DOTS - 1) as f32;
+            let x = cx + (t - 0.5) * 17.0;
+            let y = base_y + amp * (1.0 - (2.0 * t - 1.0).powi(2));
+            dot(quads, x, y, d, dark, 1.0);
+        }
     }
 
     /// Draw the sheen over correctly-struck note bars. Uses the same geometry
@@ -646,6 +693,17 @@ fn s2l(c: u8) -> f32 {
     } else {
         ((u + 0.055) / 1.055).powf(2.4)
     }
+}
+
+/// Push a filled circle of diameter `d` centred at (x, y).
+fn dot(quads: &mut QuadRenderer, x: f32, y: f32, d: f32, color: [f32; 3], a: f32) {
+    let half = d * 0.5;
+    quads.push(QuadInstance {
+        position: [x - half, y - half],
+        size: [d, d],
+        color: [color[0], color[1], color[2], a],
+        border_radius: [half, half, half, half],
+    });
 }
 
 fn mix(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {

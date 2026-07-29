@@ -175,7 +175,15 @@ impl PlayingScene {
         let range_start = self.keyboard.range().start();
         let hit_line_y = pos.y;
 
+        // Scoring is only meaningful in play-along: with every track on Auto
+        // the song plays itself and user presses match nothing, so grading
+        // them (as all-wrong) would just be noise. Drain and ignore.
+        let scoring = self.player.has_human_track();
+
         for e in self.player.take_hit_events() {
+            if !scoring {
+                continue;
+            }
             let id = e.note_id.wrapping_sub(range_start) as usize;
             let Some(key) = self.keyboard.layout().keys.get(id) else {
                 continue;
@@ -229,7 +237,28 @@ impl PlayingScene {
     /// Guitar-Hero HUD: top-left streak counter + audience sentiment, rising
     /// PERFECT/GOOD grades out of the keys, and the pulsing combo counter.
     fn update_hud(&mut self, ctx: &Context) {
-        // --- top-left streak counter + audience emoji -----------------------
+        // Slide the whole top-left block down as the top bar expands so the
+        // dropdown never covers it.
+        let hud_top = self
+            .top_bar
+            .topbar_expand_animation
+            .animate_bool(0.0, 75.0, ctx.frame_timestamp);
+
+        // Without a Human track there is nothing to score — point that out
+        // instead of showing a scoreboard stuck at zero.
+        if !self.player.has_human_track() {
+            nuon::label()
+                .text("Play-along scoring off — set a track to Human in song setup")
+                .font_size(13.0)
+                .color(nuon::Color::new_u8(150, 150, 150, 0.8))
+                .text_justify(nuon::TextJustify::Left)
+                .pos(16.0, hud_top + 10.0)
+                .size(420.0, 13.0)
+                .build(&mut self.nuon);
+            return;
+        }
+
+        // --- top-left streak counter + audience face + dial -----------------
         if self.effects.has_activity() {
             let on_fire = self.effects.on_fire();
             let streak_color = if on_fire {
@@ -244,7 +273,7 @@ impl PlayingScene {
                 .color(streak_color)
                 .bold(true)
                 .text_justify(nuon::TextJustify::Left)
-                .pos(16.0, 10.0)
+                .pos(16.0, hud_top + 10.0)
                 .size(120.0, 36.0)
                 .build(&mut self.nuon);
 
@@ -253,7 +282,7 @@ impl PlayingScene {
                 .font_size(12.0)
                 .color(nuon::Color::new_u8(190, 190, 190, 1.0))
                 .text_justify(nuon::TextJustify::Left)
-                .pos(16.0, 48.0)
+                .pos(16.0, hud_top + 48.0)
                 .size(120.0, 12.0)
                 .build(&mut self.nuon);
 
@@ -262,22 +291,24 @@ impl PlayingScene {
                 .font_size(12.0)
                 .color(nuon::Color::new_u8(150, 150, 150, 1.0))
                 .text_justify(nuon::TextJustify::Left)
-                .pos(16.0, 66.0)
+                .pos(16.0, hud_top + 66.0)
                 .size(160.0, 12.0)
                 .build(&mut self.nuon);
 
-            // The audience weighs in: emoji + speedometer-style dial.
-            if let Some(emoji) = self.effects.sentiment_emoji() {
-                nuon::label()
-                    .text(emoji)
-                    .font_size(34.0)
-                    .text_justify(nuon::TextJustify::Left)
-                    .pos(110.0, 12.0)
-                    .size(50.0, 40.0)
-                    .build(&mut self.nuon);
-
-                self.effects
-                    .render_sentiment_dial(&mut self.quad_renderer_fg, 210.0, 52.0, 28.0);
+            // The audience weighs in: a drawn face + speedometer-style dial.
+            if let Some(level) = self.effects.sentiment_level() {
+                self.effects.render_sentiment_face(
+                    &mut self.quad_renderer_fg,
+                    130.0,
+                    hud_top + 32.0,
+                    level,
+                );
+                self.effects.render_sentiment_dial(
+                    &mut self.quad_renderer_fg,
+                    212.0,
+                    hud_top + 52.0,
+                    28.0,
+                );
             }
         }
 
