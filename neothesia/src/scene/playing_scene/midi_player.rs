@@ -212,6 +212,11 @@ impl MidiPlayer {
         &self.play_along
     }
 
+    /// Drain Guitar-Hero hit events (correct/wrong) since the last frame.
+    pub fn take_hit_events(&mut self) -> Vec<HitEvent> {
+        self.play_along.take_hit_events()
+    }
+
     pub fn user_midi_event(&mut self, channel: u8, message: &MidiMessage) {
         self.output.midi_event(u4::new(channel), *message);
         self.play_along.midi_event(MidiEventSource::User, message);
@@ -231,6 +236,21 @@ fn should_forward_human_event(message: &MidiMessage) -> bool {
 }
 
 type NoteId = u8;
+
+/// Result of a play-along key press, consumed by the visual effects system.
+#[derive(Debug, Clone, Copy)]
+pub enum HitKind {
+    /// User played a required note correctly (in time).
+    Good,
+    /// User played a note that the song did not ask for (expired unmatched).
+    Wrong,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct HitEvent {
+    pub note_id: NoteId,
+    pub kind: HitKind,
+}
 
 #[derive(Debug, Default)]
 struct PlayerStats {
@@ -287,6 +307,10 @@ pub struct PlayAlong {
     /// File notes that had NoteOn event, but no NoteOff yet
     in_proggres_file_notes: HashSet<NoteId>,
 
+    /// Correct/wrong hit events accumulated since the last frame, drained by
+    /// the visual effects system (Guitar-Hero-style sparks & combo).
+    hit_events: Vec<HitEvent>,
+
     stats: PlayerStats,
 }
 
@@ -297,8 +321,14 @@ impl PlayAlong {
             required_notes: Default::default(),
             user_pressed_recently: Default::default(),
             in_proggres_file_notes: Default::default(),
+            hit_events: Vec::new(),
             stats: PlayerStats::default(),
         }
+    }
+
+    /// Drain the correct/wrong hit events collected since the last call.
+    pub fn take_hit_events(&mut self) -> Vec<HitEvent> {
+        std::mem::take(&mut self.hit_events)
     }
 
     fn update(&mut self) {
@@ -306,14 +336,24 @@ impl PlayAlong {
         let now = Instant::now();
         let threshold = Duration::from_millis(500);
 
-        // Track the count of items before retain
-        let count_before = self.user_pressed_recently.len();
+        // Retain only the items that are within the threshold; anything that
+        // expired unmatched was a wrong note.
+        let mut expired: Vec<NoteId> = Vec::new();
+        self.user_pressed_recently.retain(|note_id, item| {
+            let keep = now.duration_since(item.timestamp) <= threshold;
+            if !keep {
+                expired.push(*note_id);
+            }
+            keep
+        });
 
-        // Retain only the items that are within the threshold
-        self.user_pressed_recently
-            .retain(|_, item| now.duration_since(item.timestamp) <= threshold);
-
-        self.stats.wrong_notes += count_before - self.user_pressed_recently.len();
+        self.stats.wrong_notes += expired.len();
+        for note_id in expired {
+            self.hit_events.push(HitEvent {
+                note_id,
+                kind: HitKind::Wrong,
+            });
+        }
     }
 
     fn user_press_key(&mut self, note_id: u8, active: bool) {
@@ -325,6 +365,10 @@ impl PlayAlong {
                 self.stats
                     .played_late
                     .push(timestamp.duration_since(required_press.timestamp));
+                self.hit_events.push(HitEvent {
+                    note_id,
+                    kind: HitKind::Good,
+                });
             } else {
                 // This note was not played by file yet, place it in recents
                 let got_replaced = self
@@ -347,6 +391,10 @@ impl PlayAlong {
                 self.stats
                     .played_early
                     .push(timestamp.duration_since(press.timestamp));
+                self.hit_events.push(HitEvent {
+                    note_id,
+                    kind: HitKind::Good,
+                });
             } else {
                 // Player never pressed that note, let it reach required_notes
 

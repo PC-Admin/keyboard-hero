@@ -20,7 +20,10 @@ mod keyboard;
 pub use keyboard::Keyboard;
 
 pub(crate) mod midi_player;
-use midi_player::MidiPlayer;
+use midi_player::{HitKind, MidiPlayer};
+
+mod effects;
+use effects::EffectsSystem;
 
 mod rewind_controller;
 use rewind_controller::RewindController;
@@ -45,6 +48,7 @@ pub struct PlayingScene {
     quad_renderer_bg: QuadRenderer,
     quad_renderer_fg: QuadRenderer,
     glow: Option<GlowRenderer>,
+    effects: EffectsSystem,
     toast_manager: ToastManager,
 
     nuon: nuon::Ui,
@@ -124,6 +128,7 @@ impl PlayingScene {
             quad_renderer_bg,
             quad_renderer_fg,
             glow,
+            effects: EffectsSystem::new(),
             toast_manager: ToastManager::default(),
 
             nuon: nuon::Ui::new(),
@@ -158,6 +163,64 @@ impl PlayingScene {
                 delta,
             );
         }
+    }
+
+    /// Spawn Guitar-Hero sparks for hit events and advance the particle sim.
+    fn update_effects(&mut self, delta: Duration) {
+        let dt = delta.as_secs_f32();
+        let pos = *self.keyboard.pos();
+        let neutral_w = self.keyboard.layout().sizing.neutral_width;
+        let board_width = self.keyboard.layout().width;
+        let range_start = self.keyboard.range().start();
+        let hit_line_y = pos.y;
+
+        for e in self.player.take_hit_events() {
+            let id = e.note_id.wrapping_sub(range_start) as usize;
+            let Some(cx) = self
+                .keyboard
+                .layout()
+                .keys
+                .get(id)
+                .map(|k| pos.x + k.x() + k.width() / 2.0)
+            else {
+                continue;
+            };
+
+            match e.kind {
+                HitKind::Good => self.effects.good_hit(e.note_id, cx, hit_line_y, neutral_w),
+                HitKind::Wrong => self.effects.wrong_hit(cx, hit_line_y),
+            }
+        }
+
+        self.effects.update(dt, hit_line_y, pos.x, board_width);
+    }
+
+    /// Guitar-Hero combo / multiplier counter above the keyboard.
+    fn update_combo_hud(&mut self, ctx: &Context) {
+        let combo = self.effects.combo();
+        if combo < 2 {
+            return;
+        }
+
+        let pop = self.effects.combo_pop();
+        let font_size = 32.0 + pop * 24.0;
+        let mult = self.effects.multiplier();
+
+        let color = if self.effects.on_fire() {
+            nuon::Color::new_u8(255, 150, 30, 1.0)
+        } else {
+            nuon::Color::new_u8(255, 255, 255, 1.0)
+        };
+
+        nuon::label()
+            .text(format!("x{mult}    {combo} COMBO"))
+            .font_size(font_size)
+            .color(color)
+            .bold(true)
+            .y(self.keyboard.pos().y - 130.0)
+            .height(font_size)
+            .width(ctx.window_state.logical_size.width)
+            .build(&mut self.nuon);
     }
 
     fn update_chord_identifier(&mut self, enabled: bool) {
@@ -242,6 +305,10 @@ impl Scene for PlayingScene {
         }
 
         self.update_glow(delta);
+
+        self.update_effects(delta);
+        self.effects.render(&mut self.quad_renderer_fg);
+        self.update_combo_hud(ctx);
 
         TopBar::update(self, ctx);
 
