@@ -203,24 +203,61 @@ impl PlayingScene {
         }
 
         let pop = self.effects.combo_pop();
-        let font_size = 32.0 + pop * 24.0;
+        let on_fire = self.effects.on_fire();
         let mult = self.effects.multiplier();
+        let win_w = ctx.window_state.logical_size.width;
 
-        let color = if self.effects.on_fire() {
-            nuon::Color::new_u8(255, 150, 30, 1.0)
+        // Big and pulsing; grows further as the combo climbs.
+        let grow = (combo as f32 / 50.0).min(1.0);
+        let font_size = 56.0 + pop * 48.0 + grow * 22.0;
+        let y = self.keyboard.pos().y - 170.0;
+
+        // Colour ramps white -> gold -> blazing orange.
+        let color = if on_fire {
+            nuon::Color::new_u8(255, 105, 25, 1.0)
+        } else if combo >= 10 {
+            nuon::Color::new_u8(255, 216, 74, 1.0)
         } else {
             nuon::Color::new_u8(255, 255, 255, 1.0)
         };
 
+        // Soft glow slab behind the text (rendered under the nuon layer).
+        let glow_h = font_size * 2.2;
+        let glow_a = 0.10 + pop * 0.22 + if on_fire { 0.12 } else { 0.0 };
+        let gc = if on_fire {
+            [1.4, 0.45, 0.06, glow_a]
+        } else {
+            [0.35, 0.5, 1.0, glow_a]
+        };
+        self.quad_renderer_fg.push(neothesia_core::render::QuadInstance {
+            position: [win_w * 0.5 - win_w * 0.35, y + font_size * 0.5 - glow_h * 0.5],
+            size: [win_w * 0.7, glow_h],
+            color: gc,
+            border_radius: [glow_h * 0.5; 4],
+        });
+
         nuon::label()
-            .text(format!("x{mult}    {combo} COMBO"))
+            .text(format!("x{mult}     {combo} COMBO"))
             .font_size(font_size)
             .color(color)
             .bold(true)
-            .y(self.keyboard.pos().y - 130.0)
+            .y(y)
             .height(font_size)
-            .width(ctx.window_state.logical_size.width)
+            .width(win_w)
             .build(&mut self.nuon);
+
+        if on_fire {
+            let fire_size = 30.0 + pop * 12.0;
+            nuon::label()
+                .text("- ON FIRE! -")
+                .font_size(fire_size)
+                .color(nuon::Color::new_u8(255, 170, 40, 1.0))
+                .bold(true)
+                .y(y - fire_size - 6.0)
+                .height(fire_size)
+                .width(win_w)
+                .build(&mut self.nuon);
+        }
     }
 
     fn update_chord_identifier(&mut self, enabled: bool) {
@@ -308,6 +345,11 @@ impl Scene for PlayingScene {
 
         self.update_effects(delta);
         self.effects.render(&mut self.quad_renderer_fg);
+        self.effects.render_screen_flash(
+            &mut self.quad_renderer_fg,
+            ctx.window_state.logical_size.width,
+            ctx.window_state.logical_size.height,
+        );
         self.update_combo_hud(ctx);
 
         TopBar::update(self, ctx);
