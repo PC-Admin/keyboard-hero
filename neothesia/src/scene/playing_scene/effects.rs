@@ -167,26 +167,44 @@ impl Results {
     }
 
     /// Arcade letter grade with its display colour, from the performance
-    /// score. All-PERFECT play is an S; clean but imprecise play caps at A;
-    /// slow-but-correct play sits around C.
+    /// score. Fine-grained ladder from A++ (near-flawless, gold) down to F.
+    /// All-PERFECT play is an A++; clean all-GOOD play sits near A-;
+    /// slow-but-correct play lands in the C range.
     pub fn grade(&self) -> (&'static str, (u8, u8, u8)) {
+        const GOLD: (u8, u8, u8) = (255, 200, 40);
+        const GREEN: (u8, u8, u8) = (80, 220, 90);
+        const BLUE: (u8, u8, u8) = (70, 140, 255);
+        const ORANGE: (u8, u8, u8) = (255, 150, 50);
+        const RED_ORANGE: (u8, u8, u8) = (235, 95, 50);
+        const RED: (u8, u8, u8) = (225, 55, 50);
+
+        const LADDER: [(f32, &str, (u8, u8, u8)); 12] = [
+            (0.97, "A++", GOLD),
+            (0.93, "A+", GREEN),
+            (0.88, "A", GREEN),
+            (0.84, "A-", GREEN),
+            (0.79, "B+", BLUE),
+            (0.73, "B", BLUE),
+            (0.67, "B-", BLUE),
+            (0.61, "C+", ORANGE),
+            (0.55, "C", ORANGE),
+            (0.48, "C-", ORANGE),
+            (0.40, "D+", RED_ORANGE),
+            (0.30, "D", RED_ORANGE),
+        ];
+
         let score = self.performance();
-        if score >= 0.95 {
-            ("S", (255, 200, 40))
-        } else if score >= 0.85 {
-            ("A", (80, 220, 90))
-        } else if score >= 0.70 {
-            ("B", (70, 140, 255))
-        } else if score >= 0.55 {
-            ("C", (255, 150, 50))
-        } else {
-            ("D", (230, 60, 50))
+        for (min, name, color) in LADDER {
+            if score >= min {
+                return (name, color);
+            }
         }
+        ("F", RED)
     }
 
-    /// Does this performance deserve fireworks? (A grade or better.)
+    /// Does this performance deserve fireworks? (A- or better.)
     pub fn celebratory(&self) -> bool {
-        self.performance() >= 0.85
+        self.performance() >= 0.84
     }
 }
 
