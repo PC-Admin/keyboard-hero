@@ -252,6 +252,7 @@ impl PlayingScene {
         let results = self.effects.results();
         let (grade, (gr, gg, gb)) = results.grade();
         let accuracy = (results.accuracy() * 100.0).round() as u32;
+        let performance = (results.performance() * 100.0).round() as u32;
 
         let top = win_h * 0.16;
 
@@ -275,7 +276,7 @@ impl PlayingScene {
             .build(&mut self.nuon);
 
         nuon::label()
-            .text(format!("{accuracy}% accuracy"))
+            .text(format!("{performance}% performance  ·  {accuracy}% accuracy"))
             .font_size(24.0)
             .color(nuon::Color::new_u8(255, 255, 255, 1.0))
             .bold(true)

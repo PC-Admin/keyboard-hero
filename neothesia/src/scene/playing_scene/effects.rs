@@ -151,25 +151,42 @@ impl Results {
         self.total_hit() as f32 / total as f32
     }
 
-    /// Arcade letter grade with its display colour.
+    /// Timing-weighted performance score in 0..1. Accuracy alone is too easy
+    /// in wait-mode (the song waits for you, so avoiding wrong notes is most
+    /// of it) — the grade should reward *precision*: a PERFECT is full
+    /// credit, a GOOD is most of it, a slow OK hit only half, a wrong note
+    /// nothing.
+    pub fn performance(&self) -> f32 {
+        let total = self.total_hit() + self.wrong;
+        if total == 0 {
+            return 0.0;
+        }
+        let weighted =
+            self.perfect as f32 * 1.0 + self.good as f32 * 0.85 + self.ok as f32 * 0.55;
+        weighted / total as f32
+    }
+
+    /// Arcade letter grade with its display colour, from the performance
+    /// score. All-PERFECT play is an S; clean but imprecise play caps at A;
+    /// slow-but-correct play sits around C.
     pub fn grade(&self) -> (&'static str, (u8, u8, u8)) {
-        let acc = self.accuracy();
-        if acc >= 0.97 {
+        let score = self.performance();
+        if score >= 0.95 {
             ("S", (255, 200, 40))
-        } else if acc >= 0.90 {
+        } else if score >= 0.85 {
             ("A", (80, 220, 90))
-        } else if acc >= 0.75 {
+        } else if score >= 0.70 {
             ("B", (70, 140, 255))
-        } else if acc >= 0.60 {
+        } else if score >= 0.55 {
             ("C", (255, 150, 50))
         } else {
             ("D", (230, 60, 50))
         }
     }
 
-    /// Does this performance deserve fireworks?
+    /// Does this performance deserve fireworks? (A grade or better.)
     pub fn celebratory(&self) -> bool {
-        self.accuracy() >= 0.90
+        self.performance() >= 0.85
     }
 }
 
