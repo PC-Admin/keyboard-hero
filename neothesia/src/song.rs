@@ -22,14 +22,26 @@ pub struct SongConfig {
 }
 
 impl SongConfig {
-    fn new(tracks: &[MidiTrack]) -> Self {
+    /// Rainbow-keys fork: when `default_human` is set, the first melodic
+    /// track (has notes, not pure drums) defaults to Human so play-along
+    /// scoring works out of the box; everything else accompanies on Auto.
+    fn new(tracks: &[MidiTrack], default_human: bool) -> Self {
+        let mut human_assigned = !default_human;
         let tracks: Vec<_> = tracks
             .iter()
             .map(|t| {
                 let is_drums = t.has_drums && !t.has_other_than_drums;
+
+                let player = if !human_assigned && !is_drums && !t.notes.is_empty() {
+                    human_assigned = true;
+                    PlayerConfig::Human
+                } else {
+                    PlayerConfig::Auto
+                };
+
                 TrackConfig {
                     track_id: t.track_id,
-                    player: PlayerConfig::Auto,
+                    player,
                     visible: !is_drums,
                 }
             })
@@ -48,7 +60,14 @@ pub struct Song {
 
 impl Song {
     pub fn new(file: midi_file::MidiFile) -> Self {
-        let config = SongConfig::new(&file.tracks);
+        let config = SongConfig::new(&file.tracks, true);
+        Self { file, config }
+    }
+
+    /// All tracks on Auto — for playback that must not wait on user input
+    /// (e.g. previewing a freeplay recording).
+    pub fn new_all_auto(file: midi_file::MidiFile) -> Self {
+        let config = SongConfig::new(&file.tracks, false);
         Self { file, config }
     }
 

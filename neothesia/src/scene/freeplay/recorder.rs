@@ -527,7 +527,8 @@ fn stop_recording(scene: &mut FreeplayScene, ctx: &Context) -> Result<(), Record
 
     let midi = midi_file::MidiFile::from_smf("freeplay-recording.mid", smf)
         .map_err(RecorderError::MidiFileParse)?;
-    let song = Song::new(midi);
+    // Preview must play itself back — never wait on user input.
+    let song = Song::new_all_auto(midi);
 
     scene.keyboard.set_song_config(song.config.clone());
     scene.keyboard.reset_notes();
