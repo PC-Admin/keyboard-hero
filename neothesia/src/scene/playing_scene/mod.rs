@@ -57,6 +57,10 @@ pub struct PlayingScene {
     deduced_chord_name: String,
 
     top_bar: TopBar,
+
+    /// Song ended in play-along mode: show the results screen until the
+    /// player leaves (Enter/Esc).
+    finished: bool,
 }
 
 impl PlayingScene {
@@ -136,6 +140,8 @@ impl PlayingScene {
             deduced_chord_name: String::new(),
 
             top_bar: TopBar::new(),
+
+            finished: false,
         }
     }
 
@@ -177,8 +183,9 @@ impl PlayingScene {
 
         // Scoring is only meaningful in play-along: with every track on Auto
         // the song plays itself and user presses match nothing, so grading
-        // them (as all-wrong) would just be noise. Drain and ignore.
-        let scoring = self.player.has_human_track();
+        // them (as all-wrong) would just be noise. Drain and ignore. Also
+        // freeze the tallies once the results screen is up.
+        let scoring = self.player.has_human_track() && !self.finished;
 
         for e in self.player.take_hit_events() {
             if !scoring {
@@ -236,7 +243,84 @@ impl PlayingScene {
 
     /// Guitar-Hero HUD: top-left streak counter + audience sentiment, rising
     /// PERFECT/GOOD grades out of the keys, and the pulsing combo counter.
+    /// Arcade results screen shown over the dimmed scene when a play-along
+    /// song ends.
+    fn results_overlay_ui(&mut self, ctx: &Context) {
+        let win_w = ctx.window_state.logical_size.width;
+        let win_h = ctx.window_state.logical_size.height;
+
+        let results = self.effects.results();
+        let (grade, (gr, gg, gb)) = results.grade();
+        let accuracy = (results.accuracy() * 100.0).round() as u32;
+
+        let top = win_h * 0.16;
+
+        nuon::label()
+            .text("SONG COMPLETE")
+            .font_size(26.0)
+            .color(nuon::Color::new_u8(220, 220, 220, 1.0))
+            .y(top)
+            .height(28.0)
+            .width(win_w)
+            .build(&mut self.nuon);
+
+        nuon::label()
+            .text(grade)
+            .font_size(150.0)
+            .color(nuon::Color::new_u8(gr, gg, gb, 1.0))
+            .bold(true)
+            .y(top + 40.0)
+            .height(150.0)
+            .width(win_w)
+            .build(&mut self.nuon);
+
+        nuon::label()
+            .text(format!("{accuracy}% accuracy"))
+            .font_size(24.0)
+            .color(nuon::Color::new_u8(255, 255, 255, 1.0))
+            .bold(true)
+            .y(top + 210.0)
+            .height(26.0)
+            .width(win_w)
+            .build(&mut self.nuon);
+
+        nuon::label()
+            .text(format!(
+                "PERFECT {}    GOOD {}    OK {}    WRONG {}",
+                results.perfect, results.good, results.ok, results.wrong
+            ))
+            .font_size(19.0)
+            .color(nuon::Color::new_u8(230, 230, 230, 1.0))
+            .y(top + 250.0)
+            .height(20.0)
+            .width(win_w)
+            .build(&mut self.nuon);
+
+        nuon::label()
+            .text(format!("Best streak: {}", results.best_combo))
+            .font_size(19.0)
+            .color(nuon::Color::new_u8(255, 200, 90, 1.0))
+            .y(top + 280.0)
+            .height(20.0)
+            .width(win_w)
+            .build(&mut self.nuon);
+
+        nuon::label()
+            .text("Press Enter for menu")
+            .font_size(15.0)
+            .color(nuon::Color::new_u8(160, 160, 160, 1.0))
+            .y(top + 330.0)
+            .height(16.0)
+            .width(win_w)
+            .build(&mut self.nuon);
+    }
+
     fn update_hud(&mut self, ctx: &Context) {
+        if self.finished {
+            self.results_overlay_ui(ctx);
+            return;
+        }
+
         // Slide the whole top-left block down as the top bar expands so the
         // dropdown never covers it.
         let hud_top = self
@@ -465,6 +549,29 @@ impl Scene for PlayingScene {
         self.update_glow(delta);
 
         self.update_effects(delta, time);
+
+        // Results screen: dim everything below, then let the celebration
+        // fireworks (drawn next) sparkle on top of the dimmer.
+        if self.finished {
+            self.quad_renderer_fg.push(neothesia_core::render::QuadInstance {
+                position: [0.0, 0.0],
+                size: [
+                    ctx.window_state.logical_size.width,
+                    ctx.window_state.logical_size.height,
+                ],
+                color: [0.0, 0.0, 0.0, 0.55],
+                border_radius: [0.0; 4],
+            });
+
+            if self.effects.results().celebratory() {
+                self.effects.celebrate(
+                    delta.as_secs_f32(),
+                    ctx.window_state.logical_size.width,
+                    ctx.window_state.logical_size.height,
+                );
+            }
+        }
+
         self.effects.render(&mut self.quad_renderer_fg);
         self.effects.render_note_flashes(
             &mut self.quad_renderer_fg,
@@ -508,9 +615,15 @@ impl Scene for PlayingScene {
         );
 
         if self.player.is_finished() && !self.player.is_paused() {
-            ctx.proxy
-                .send_event(NeothesiaEvent::MainMenu(Some(self.player.song().clone())))
-                .ok();
+            if self.player.has_human_track() && self.effects.has_activity() && !self.finished {
+                // Play-along run: freeze here and show the results screen.
+                self.finished = true;
+                self.player.pause();
+            } else if !self.finished {
+                ctx.proxy
+                    .send_event(NeothesiaEvent::MainMenu(Some(self.player.song().clone())))
+                    .ok();
+            }
         }
     }
 
@@ -544,7 +657,13 @@ impl Scene for PlayingScene {
                 .ok();
         }
 
-        if event.key_released(Key::Named(NamedKey::Space)) {
+        if self.finished && event.key_released(Key::Named(NamedKey::Enter)) {
+            ctx.proxy
+                .send_event(NeothesiaEvent::MainMenu(Some(self.player.song().clone())))
+                .ok();
+        }
+
+        if !self.finished && event.key_released(Key::Named(NamedKey::Space)) {
             self.player.pause_resume();
         }
 

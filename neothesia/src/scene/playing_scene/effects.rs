@@ -117,6 +117,60 @@ pub struct EffectsSystem {
     /// Smoothed 0..1 sentiment shown by the dial needle (eases toward the
     /// rolling accuracy so it sweeps like a real gauge).
     sentiment_display: f32,
+
+    // Whole-song tallies for the results screen.
+    total_perfect: u32,
+    total_good: u32,
+    total_ok: u32,
+    total_wrong: u32,
+
+    /// Timer for celebration fireworks on the results screen.
+    celebrate_acc: f32,
+}
+
+/// Whole-song performance summary for the results screen.
+#[derive(Clone, Copy)]
+pub struct Results {
+    pub perfect: u32,
+    pub good: u32,
+    pub ok: u32,
+    pub wrong: u32,
+    pub best_combo: u32,
+}
+
+impl Results {
+    pub fn total_hit(&self) -> u32 {
+        self.perfect + self.good + self.ok
+    }
+
+    pub fn accuracy(&self) -> f32 {
+        let total = self.total_hit() + self.wrong;
+        if total == 0 {
+            return 0.0;
+        }
+        self.total_hit() as f32 / total as f32
+    }
+
+    /// Arcade letter grade with its display colour.
+    pub fn grade(&self) -> (&'static str, (u8, u8, u8)) {
+        let acc = self.accuracy();
+        if acc >= 0.97 {
+            ("S", (255, 200, 40))
+        } else if acc >= 0.90 {
+            ("A", (80, 220, 90))
+        } else if acc >= 0.75 {
+            ("B", (70, 140, 255))
+        } else if acc >= 0.60 {
+            ("C", (255, 150, 50))
+        } else {
+            ("D", (230, 60, 50))
+        }
+    }
+
+    /// Does this performance deserve fireworks?
+    pub fn celebratory(&self) -> bool {
+        self.accuracy() >= 0.90
+    }
 }
 
 impl EffectsSystem {
@@ -132,6 +186,21 @@ impl EffectsSystem {
             combo_pop: 0.0,
             ember_acc: 0.0,
             sentiment_display: 0.5,
+            total_perfect: 0,
+            total_good: 0,
+            total_ok: 0,
+            total_wrong: 0,
+            celebrate_acc: 0.0,
+        }
+    }
+
+    pub fn results(&self) -> Results {
+        Results {
+            perfect: self.total_perfect,
+            good: self.total_good,
+            ok: self.total_ok,
+            wrong: self.total_wrong,
+            best_combo: self.best_combo,
         }
     }
 
@@ -241,6 +310,14 @@ impl EffectsSystem {
         self.best_combo = self.best_combo.max(self.combo);
         self.combo_pop = 1.0;
         self.record_result(true);
+
+        if delta_secs <= PERFECT_WINDOW {
+            self.total_perfect += 1;
+        } else if delta_secs <= GOOD_WINDOW {
+            self.total_good += 1;
+        } else {
+            self.total_ok += 1;
+        }
 
         // Timing grade text rising out of the key.
         if delta_secs <= GOOD_WINDOW {
@@ -373,6 +450,7 @@ impl EffectsSystem {
         self.combo = 0;
         self.combo_pop = 0.0;
         self.record_result(false);
+        self.total_wrong += 1;
 
         for _ in 0..14 {
             if !self.room() {
@@ -395,6 +473,48 @@ impl EffectsSystem {
                 color: [0.4, 0.07, 0.07],
                 gravity: GRAVITY * 0.7,
                 style: Style::Puff,
+            });
+        }
+    }
+
+    /// Celebration fireworks for the results screen: periodic colourful
+    /// bursts at random spots in the upper part of the window.
+    pub fn celebrate(&mut self, dt: f32, win_w: f32, win_h: f32) {
+        self.celebrate_acc += dt;
+        if self.celebrate_acc < 0.55 {
+            return;
+        }
+        self.celebrate_acc = 0.0;
+
+        let x = self.rand_range(win_w * 0.1, win_w * 0.9);
+        let y = self.rand_range(win_h * 0.12, win_h * 0.5);
+
+        const NOTES: [u8; 7] = [0, 2, 4, 5, 7, 9, 11];
+        let note = NOTES[(self.next_u64() % NOTES.len() as u64) as usize];
+        let base = note_linear_color(note);
+
+        for _ in 0..70 {
+            if !self.room() {
+                break;
+            }
+            let ang = self.rand_range(0.0, std::f32::consts::TAU);
+            let speed = self.rand_range(140.0, 640.0);
+            let life = self.rand_range(0.6, 1.5);
+            let size = self.rand_range(6.0, 15.0);
+            let hot = self.rand() * 0.7;
+            let color = mix(base, [2.2, 2.2, 2.0], hot);
+            self.particles.push(Particle {
+                x,
+                y,
+                vx: ang.cos() * speed,
+                vy: ang.sin() * speed,
+                life,
+                max_life: life,
+                size,
+                length: 0.0,
+                color,
+                gravity: GRAVITY * 0.6,
+                style: Style::Spark,
             });
         }
     }
