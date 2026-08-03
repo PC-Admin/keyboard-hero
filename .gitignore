@@ -1,4 +1,8 @@
-/target
+# Cargo build artifacts. Deliberately NOT anchored with a leading slash: this
+# tree gets copied into other checkouts (sometimes as a subdirectory), and
+# `/target` would only ever match at the repo root, letting a 180MB debug
+# binary through on the copy.
+target/
 **/*.rs.bk
 /settings.ron
 /out
