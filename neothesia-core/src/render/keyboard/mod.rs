@@ -30,6 +30,18 @@ fn rainbow_color(note_id: u8) -> Option<Color> {
     Some(Color::from_rgba8(r, g, b, 1.0))
 }
 
+/// The note name drawn on a black key, or `None` for white keys.
+fn sharp_name(note_id: u8) -> Option<&'static str> {
+    Some(match note_id {
+        1 => "C#",
+        3 => "D#",
+        6 => "F#",
+        8 => "G#",
+        10 => "A#",
+        _ => return None,
+    })
+}
+
 /// The note letter drawn inside the rainbow square, or `None` for keys that
 /// don't get a square.
 fn rainbow_letter(note_id: u8) -> Option<&'static str> {
@@ -55,9 +67,9 @@ fn rainbow_square(key: &piano_layout::Key, pos: Point<f32>) -> Option<(Color, f3
     let side = key_w * 0.7;
 
     let x = pos.x + key.x() + (key_w - side) / 2.0;
-    // Center the square ~72% down the key, keeping it clear of both the black
-    // keys above and the octave labels at the very bottom.
-    let y = pos.y + key.height() * 0.72 - side / 2.0;
+    // Sit the square near the bottom of the key, on the space the stock
+    // octave markers used to occupy, with a small margin below it.
+    let y = pos.y + key.height() - side - key.height() * 0.05;
 
     Some((color, x, y, side))
 }
@@ -211,23 +223,28 @@ impl KeyboardRenderer {
         let font_system = crate::font_system::font_system();
         let font_system = &mut font_system.borrow_mut();
 
-        let range_start = self.layout.range.start() as usize;
-        for key in self.layout.keys.iter().filter(|key| key.note_id() == 0) {
+        // (The stock grey C4/C5/... octave markers used to be drawn here —
+        // the rainbow squares have superseded them.)
+
+        // Small white note name near the bottom of each black key ("A#").
+        for key in self.layout.keys.iter().filter(|key| key.kind().is_sharp()) {
+            let Some(name) = sharp_name(key.note_id()) else {
+                continue;
+            };
+
             let x = self.pos.x + key.x();
             let y = self.pos.y;
-
             let w = key.width();
             let h = key.height();
 
-            let size = w * 0.7;
+            let font_size = w * 0.42;
 
-            let oct_number = (key.id() + range_start) / 12;
-
-            let mut buffer = glyphon::Buffer::new(font_system, glyphon::Metrics::new(size, size));
+            let mut buffer =
+                glyphon::Buffer::new(font_system, glyphon::Metrics::new(font_size, font_size));
             buffer.set_size(Some(w), Some(h));
             buffer.set_wrap(glyphon::Wrap::None);
             buffer.set_text(
-                &format!("C{}", oct_number as i8 - 1),
+                name,
                 &glyphon::Attrs::new().family(glyphon::Family::SansSerif),
                 glyphon::Shaping::Basic,
                 Some(glyphon::cosmic_text::Align::Center),
@@ -237,7 +254,7 @@ impl KeyboardRenderer {
             self.text_cache.push(super::text::TextArea {
                 buffer,
                 left: x,
-                top: y + h - size * 1.2,
+                top: y + h - font_size * 1.6,
                 scale: 1.0,
                 bounds: glyphon::TextBounds {
                     left: x.round() as i32,
@@ -245,7 +262,7 @@ impl KeyboardRenderer {
                     right: x.round() as i32 + w.round() as i32,
                     bottom: y.round() as i32 + h.round() as i32,
                 },
-                default_color: glyphon::Color::rgba(0, 0, 0, 150),
+                default_color: glyphon::Color::rgba(255, 255, 255, 225),
             });
         }
 

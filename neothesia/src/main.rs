@@ -249,10 +249,16 @@ impl ApplicationHandler<NeothesiaEvent> for NeothesiaBootstrap {
         }
 
         let mut attributes = winit::window::Window::default_attributes()
+            // Size the window takes when fullscreen is toggled off (F11 /
+            // Ctrl+F), not the size it opens at.
             .with_inner_size(winit::dpi::LogicalSize {
                 width: 1080.0,
                 height: 720.0,
             })
+            // Open fullscreen: it's a game, and the falling notes want the
+            // room. Borderless on the current monitor — the same state the
+            // F11 / Ctrl+F toggle uses, so leaving it behaves normally.
+            .with_fullscreen(Some(winit::window::Fullscreen::Borderless(None)))
             .with_title("KEYBOARD HERO")
             .with_min_inner_size(winit::dpi::LogicalSize {
                 width: 670.0,

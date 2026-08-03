@@ -11,8 +11,9 @@
 //!
 //! Everything draws as plain rounded quads through the existing foreground
 //! [`QuadRenderer`] (bloom faked with additive-ish translucent halos over the
-//! dark background), so there is no extra GPU pipeline. Nothing fires unless a
-//! track is set to "Human", so ordinary auto-play is untouched.
+//! dark background), so there is no extra GPU pipeline. With a Human track the
+//! player is graded in wait mode; with none, jam mode grades whatever they
+//! play over the self-playing song — unplayed notes are silent misses.
 
 use std::{collections::VecDeque, time::Instant};
 
@@ -159,6 +160,8 @@ pub struct EffectsSystem {
     total_good: u32,
     total_ok: u32,
     total_wrong: u32,
+    /// Jam-mode targets nobody played (silent combo breaks).
+    total_missed: u32,
 
     /// Arcade score: timing points per note, boosted by the combo multiplier.
     score: u64,
@@ -179,6 +182,7 @@ pub struct Results {
     pub good: u32,
     pub ok: u32,
     pub wrong: u32,
+    pub missed: u32,
     pub best_combo: u32,
     pub score: u64,
 }
@@ -189,7 +193,7 @@ impl Results {
     }
 
     pub fn accuracy(&self) -> f32 {
-        let total = self.total_hit() + self.wrong;
+        let total = self.total_hit() + self.wrong + self.missed;
         if total == 0 {
             return 0.0;
         }
@@ -203,10 +207,11 @@ impl Results {
     /// for earns very little. Wrong notes cost more than the note they
     /// occupy, so flailing can't be papered over by volume of right notes.
     pub fn performance(&self) -> f32 {
-        let total = self.total_hit() + self.wrong;
+        let total = self.total_hit() + self.wrong + self.missed;
         if total == 0 {
             return 0.0;
         }
+        // A miss is a zero-credit attempt; a wrong note costs extra on top.
         let weighted = self.perfect as f32 * 1.0 + self.good as f32 * 0.75 + self.ok as f32 * 0.25;
         let penalty = self.wrong as f32 * 0.5;
         ((weighted - penalty) / total as f32).clamp(0.0, 1.0)
@@ -273,6 +278,7 @@ impl EffectsSystem {
             total_good: 0,
             total_ok: 0,
             total_wrong: 0,
+            total_missed: 0,
             score: 0,
             celebrate_acc: 0.0,
         }
@@ -284,6 +290,7 @@ impl EffectsSystem {
             good: self.total_good,
             ok: self.total_ok,
             wrong: self.total_wrong,
+            missed: self.total_missed,
             best_combo: self.best_combo,
             score: self.score,
         }
@@ -371,8 +378,11 @@ impl EffectsSystem {
     }
 
     /// True once the player has actually played something this song.
+    /// Has the *user* done anything gradeable? Misses don't count — an
+    /// unattended jam-mode run must not end in a results screen (and a
+    /// booing crowd) when nobody was playing.
     pub fn has_activity(&self) -> bool {
-        !self.recent.is_empty()
+        self.total_perfect + self.total_good + self.total_ok + self.total_wrong > 0
     }
 
     pub fn rising_texts(&self) -> impl Iterator<Item = &RisingText> {
@@ -605,6 +615,15 @@ impl EffectsSystem {
         self.record_result(false);
         self.total_wrong += 1;
         self.puff(cx, y, [0.4, 0.07, 0.07]);
+    }
+
+    /// Jam-mode miss: the song asked, nobody answered. Breaks the combo
+    /// with no sound, no puff, no text — failure by omission is quiet.
+    pub fn miss(&mut self) {
+        self.combo = 0;
+        self.combo_pop = 0.0;
+        self.record_result(false);
+        self.total_missed += 1;
     }
 
     /// Small dark puff at the key — the anti-celebration.
@@ -1092,6 +1111,21 @@ mod tests {
             ok,
             wrong,
             best_combo: 0,
+            missed: 0,
+            score: 0,
+        }
+        .grade()
+        .0
+    }
+
+    fn run_with_misses(perfect: u32, missed: u32) -> &'static str {
+        Results {
+            perfect,
+            good: 0,
+            ok: 0,
+            wrong: 0,
+            missed,
+            best_combo: 0,
             score: 0,
         }
         .grade()
@@ -1133,6 +1167,23 @@ mod tests {
     #[test]
     fn empty_run_does_not_divide_by_zero() {
         assert_eq!(run(0, 0, 0, 0), "F");
+    }
+
+    /// Misses are zero-credit attempts: they dilute the grade like wrong
+    /// notes but without the extra penalty, and playing nothing at all in
+    /// jam mode is an F — though the results screen never shows for it,
+    /// because misses alone are not activity.
+    #[test]
+    fn misses_dilute_the_grade_without_extra_penalty() {
+        assert_eq!(run_with_misses(100, 0), "A++");
+        assert_eq!(run_with_misses(90, 10), "A-");
+        assert_eq!(run_with_misses(0, 100), "F");
+
+        let mut fx = EffectsSystem::new();
+        fx.miss();
+        fx.miss();
+        assert!(!fx.has_activity());
+        assert_eq!(fx.results().missed, 2);
     }
 
     /// Perfect hits earn 100 points, multiplied once the combo passes each

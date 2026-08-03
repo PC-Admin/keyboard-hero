@@ -186,9 +186,9 @@ impl PlayingScene {
         let range_start = self.keyboard.range().start();
         let hit_line_y = pos.y;
 
-        // Keyboard-hero mode: Auto tracks report their own notes as perfect
-        // hits, so the effects run whether a human is playing or the song is.
-        // Only freeze the tallies once the results screen is up.
+        // Wait mode grades the human against stalled targets; jam mode
+        // grades whatever they play over the self-playing song. Only freeze
+        // the tallies once the results screen is up.
         let scoring = !self.finished;
 
         for e in self.player.take_hit_events() {
@@ -244,6 +244,9 @@ impl PlayingScene {
                     self.effects.wrong_hit(cx, hit_line_y);
                     self.sfx.fail();
                 }
+                // A note the song asked for that nobody played: fails
+                // silently — quiet combo reset, no buzzer, no text.
+                HitKind::Miss => self.effects.miss(),
             }
         }
 
@@ -296,8 +299,8 @@ impl PlayingScene {
 
         nuon::label()
             .text(format!(
-                "PERFECT {}    GOOD {}    OK {}    WRONG {}",
-                results.perfect, results.good, results.ok, results.wrong
+                "PERFECT {}    GOOD {}    OK {}    MISS {}    WRONG {}",
+                results.perfect, results.good, results.ok, results.missed, results.wrong
             ))
             .font_size(19.0)
             .color(nuon::Color::new_u8(230, 230, 230, 1.0))
@@ -342,29 +345,46 @@ impl PlayingScene {
             .topbar_expand_animation
             .animate_bool(0.0, 75.0, ctx.frame_timestamp);
 
-        // --- top-right performer toggle --------------------------------------
-        // One click hands the song to the machine (AUTO light show) or takes
-        // it back (HUMAN play-along). Tallies keep running across the switch.
+        // --- top-right performer selector -------------------------------------
+        // Three-way segmented toggle, all options visible: HERO (song rolls,
+        // target notes silent, the player performs them), AUTO (song plays
+        // itself, jam over the top), HUMAN (song waits). Tallies keep
+        // running across switches.
         {
-            let win_w = ctx.window_state.logical_size.width;
-            let human = self.player.has_human_track();
-            let (label, color) = if human {
-                ("HUMAN", nuon::Color::new_u8(160, 81, 238, 1.0))
-            } else {
-                ("AUTO", nuon::Color::new_u8(58, 58, 70, 1.0))
-            };
+            use midi_player::PerformMode;
 
-            let (w, h) = (96.0, 32.0);
-            if nuon::button()
-                .id("performer-toggle")
-                .pos(win_w - w - 16.0, hud_top + 10.0)
-                .size(w, h)
-                .color(color)
-                .border_radius([8.0; 4])
-                .label(label)
-                .build(&mut self.nuon)
-            {
-                self.player.toggle_human();
+            let win_w = ctx.window_state.logical_size.width;
+            let mode = self.player.mode();
+
+            let (w, h, gap) = (64.0, 32.0, 2.0);
+            let x0 = win_w - (w * 3.0 + gap * 2.0) - 16.0;
+
+            let segments = [
+                (PerformMode::Hero, "HERO", [8.0, 0.0, 0.0, 8.0]),
+                (PerformMode::Auto, "AUTO", [0.0; 4]),
+                (PerformMode::Human, "HUMAN", [0.0, 8.0, 8.0, 0.0]),
+            ];
+
+            for (i, (seg_mode, label, radius)) in segments.into_iter().enumerate() {
+                let active = mode == seg_mode;
+                let color = if active {
+                    nuon::Color::new_u8(160, 81, 238, 1.0)
+                } else {
+                    nuon::Color::new_u8(50, 50, 60, 0.9)
+                };
+
+                if nuon::button()
+                    .id(label)
+                    .pos(x0 + i as f32 * (w + gap), hud_top + 10.0)
+                    .size(w, h)
+                    .color(color)
+                    .border_radius(radius)
+                    .label(label)
+                    .build(&mut self.nuon)
+                    && !active
+                {
+                    self.player.set_mode(seg_mode);
+                }
             }
         }
 
@@ -528,7 +548,14 @@ impl PlayingScene {
             self.keyboard.reset_notes();
         }
 
-        if self.player.play_along().are_required_keys_pressed() {
+        // Only wait mode stalls the song on unplayed targets. Jam mode (no
+        // Human track) must keep rolling — its targets are graded against a
+        // moving song and expire as misses, so freezing on them would
+        // deadlock playback on the first note nobody played.
+        let waiting = self.player.has_human_track()
+            && !self.player.play_along().are_required_keys_pressed();
+
+        if !waiting {
             let delta = (delta / 10) * (ctx.config.speed_multiplier() * 10.0) as u32;
             let midi_events = self.player.update(delta);
             self.keyboard.file_midi_events(&ctx.config, &midi_events);

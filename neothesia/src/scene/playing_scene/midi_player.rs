@@ -10,12 +10,27 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Who performs the song, cycled by the in-game toggle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PerformMode {
+    /// The song rolls but its target notes stay *silent* — the player
+    /// supplies them, Guitar-Hero style. Graded like Auto.
+    Hero,
+    /// The song plays itself audibly; the player may jam over the top and
+    /// is graded on whatever they play. Never stalls.
+    Auto,
+    /// Classic play-along: the song stalls and waits for the player.
+    Human,
+}
+
 pub struct MidiPlayer {
     playback: midi_file::PlaybackState,
     output: OutputConnection,
     song: Song,
     play_along: PlayAlong,
     separate_channels: bool,
+    /// HERO mode latch: only meaningful while no track is Human.
+    hero: bool,
 }
 
 impl MidiPlayer {
@@ -47,6 +62,7 @@ impl MidiPlayer {
             play_along: PlayAlong::new(user_keyboard_range),
             song,
             separate_channels,
+            hero: false,
         };
         // Let's reset programs,
         // for timestamp 0 most likely all programs will be 0, so this should clean any leftovers
@@ -65,12 +81,11 @@ impl MidiPlayer {
     ///
     /// When paused: returns None
     pub fn update(&mut self, delta: Duration) -> Vec<&midi_file::MidiEvent> {
-        self.play_along.update();
-
-        // With a Human track present the human is the performer and the
-        // effects grade them alone; only an all-Auto (or Auto+Mute) song
-        // performs for itself.
-        let auto_show = !self.has_human_track();
+        // No-wait jam mode (no Human track): the song never stalls, so
+        // targets nobody played must expire as silent misses rather than
+        // pile up. In wait mode they persist — the song is waiting on them.
+        let jam_mode = !self.has_human_track();
+        self.play_along.update(jam_mode);
 
         let events = self.playback.update(delta);
 
@@ -84,17 +99,32 @@ impl MidiPlayer {
             };
             match config.player {
                 PlayerConfig::Auto => {
-                    self.output // TODO: Send to multiple outputs
-                        .midi_event(u4::new(channel), event.message);
-
-                    // Keyboard-hero mode: an Auto track's own notes drive the
-                    // same hit pipeline as a flawless human press, so the
-                    // light show runs even when nobody is playing. Channel 9
-                    // is percussion — its "notes" are drum hits, not keys.
-                    if auto_show && event.channel != 9 {
-                        if let MidiMessage::NoteOn { key, .. } = event.message {
-                            self.play_along.file_auto_press(key.as_int(), event.timestamp);
+                    // Jam modes (AUTO and HERO): the song's playable notes
+                    // become targets, so whatever the user plays on top is
+                    // graded for real — matched notes fire the effects,
+                    // unplayed ones expire as silent misses. Channel 9 is
+                    // percussion (drum hits, not keys), and notes off the
+                    // keyboard can't be played, so neither becomes a target.
+                    let note_key = match event.message {
+                        MidiMessage::NoteOn { key, .. } | MidiMessage::NoteOff { key, .. } => {
+                            Some(key.as_int())
                         }
+                        _ => None,
+                    };
+                    let is_target = jam_mode
+                        && event.channel != 9
+                        && note_key.is_some_and(|k| self.play_along.covers(k));
+
+                    // HERO mode: target notes stay silent — that part is the
+                    // player's to perform. Everything else still sounds.
+                    if !(self.hero && is_target) {
+                        self.output // TODO: Send to multiple outputs
+                            .midi_event(u4::new(channel), event.message);
+                    }
+
+                    if is_target {
+                        self.play_along
+                            .midi_event(MidiEventSource::File, &event.message);
                     }
                 }
                 PlayerConfig::Human => {
@@ -236,22 +266,35 @@ impl MidiPlayer {
     /// playback. Needed while wait-mode has the song stalled: [`Self::update`]
     /// is skipped then, but mashed wrong keys must still be judged promptly.
     pub fn tick_play_along(&mut self) {
-        self.play_along.update();
+        self.play_along.update(false);
     }
 
-    /// Flip who performs, mid-song. With any Human track set, everything goes
-    /// Auto and the song plays itself; otherwise the first melodic non-drum
-    /// track (the same one the song-setup default picks) becomes Human again.
-    /// Ringing notes are silenced and pending wait-mode targets dropped, so a
-    /// stalled song resumes on the spot instead of waiting for keys that are
-    /// no longer anyone's job.
-    pub fn toggle_human(&mut self) {
-        let make_human = !self.has_human_track();
+    pub fn mode(&self) -> PerformMode {
+        if self.has_human_track() {
+            PerformMode::Human
+        } else if self.hero {
+            PerformMode::Hero
+        } else {
+            PerformMode::Auto
+        }
+    }
+
+    /// Switch who performs, mid-song. HUMAN re-assigns the first melodic
+    /// non-drum track (the same one the song-setup default picks); the jam
+    /// modes set every Human track back to Auto, with HERO also muting the
+    /// target notes. Ringing notes are silenced and pending targets dropped,
+    /// so a stalled song resumes on the spot instead of waiting for keys
+    /// that are no longer anyone's job.
+    pub fn set_mode(&mut self, mode: PerformMode) {
+        if mode == self.mode() {
+            return;
+        }
 
         self.clear();
         self.play_along.clear();
+        self.hero = mode == PerformMode::Hero;
 
-        if make_human {
+        if mode == PerformMode::Human {
             let mut assigned = false;
             for (i, track) in self.song.file.tracks.iter().enumerate() {
                 let is_drums = track.has_drums && !track.has_other_than_drums;
@@ -282,13 +325,10 @@ impl MidiPlayer {
     pub fn user_midi_event(&mut self, channel: u8, message: &MidiMessage) {
         self.output.midi_event(u4::new(channel), *message);
 
-        // In auto mode the machine is the performer and the keyboard is a
-        // free jam over the top — nobody is being graded, so presses must
-        // not be queued for judgement (every one would expire "wrong" 500ms
-        // later and buzz).
-        if self.has_human_track() {
-            self.play_along.midi_event(MidiEventSource::User, message);
-        }
+        // Judged in every mode: in wait mode against the notes the song is
+        // stalled on, in jam mode against the notes the song is playing —
+        // so a wrong key buzzes either way, and a matching one scores.
+        self.play_along.midi_event(MidiEventSource::User, message);
     }
 }
 
@@ -316,6 +356,10 @@ pub enum HitKind {
     Good { delta: Duration, late: bool },
     /// User played a note that the song did not ask for (expired unmatched).
     Wrong,
+    /// The song asked for a note and nobody played it (no-wait jam mode
+    /// only — in wait mode the song stalls instead). Fails silently: combo
+    /// resets, no buzzer, no text.
+    Miss,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -384,10 +428,6 @@ pub struct PlayAlong {
     /// File notes that had NoteOn event, but no NoteOff yet
     in_proggres_file_notes: HashSet<NoteId>,
 
-    /// Fixed origin for mapping song-time onto the `Instant` timeline that
-    /// chord grouping runs on (auto-mode hits only).
-    epoch: Instant,
-
     /// Correct/wrong hit events accumulated since the last frame, drained by
     /// the visual effects system (Guitar-Hero-style sparks & combo).
     hit_events: Vec<HitEvent>,
@@ -402,7 +442,6 @@ impl PlayAlong {
             required_notes: Default::default(),
             user_pressed_recently: Default::default(),
             in_proggres_file_notes: Default::default(),
-            epoch: Instant::now(),
             hit_events: Vec::new(),
             stats: PlayerStats::default(),
         }
@@ -413,7 +452,12 @@ impl PlayAlong {
         std::mem::take(&mut self.hit_events)
     }
 
-    fn update(&mut self) {
+    /// Is this note on the user's keyboard, i.e. can it be a target?
+    pub fn covers(&self, note_id: u8) -> bool {
+        self.user_keyboard_range.contains(note_id)
+    }
+
+    fn update(&mut self, expire_required: bool) {
         // Instead of calling .elapsed() per item let's fetch `now` once, and subtract it ourselves
         let now = Instant::now();
         let threshold = Duration::from_millis(500);
@@ -436,6 +480,27 @@ impl PlayAlong {
                 kind: HitKind::Wrong,
                 chord: None,
             });
+        }
+
+        // Jam mode: targets nobody played within the window are silent
+        // misses. (Wait mode keeps them — the song is stalled on them.)
+        if expire_required {
+            let mut missed: Vec<NoteId> = Vec::new();
+            self.required_notes.retain(|note_id, press| {
+                let keep = now.duration_since(press.timestamp) <= threshold;
+                if !keep {
+                    missed.push(*note_id);
+                }
+                keep
+            });
+
+            for note_id in missed {
+                self.hit_events.push(HitEvent {
+                    note_id,
+                    kind: HitKind::Miss,
+                    chord: None,
+                });
+            }
         }
     }
 
@@ -464,26 +529,6 @@ impl PlayAlong {
                 }
             }
         }
-    }
-
-    /// An Auto track played this note itself. Report it as a perfectly timed
-    /// hit so the effects treat the machine as the player. `song_time` is the
-    /// note's position in the file.
-    fn file_auto_press(&mut self, note_id: u8, song_time: Duration) {
-        if !self.user_keyboard_range.contains(note_id) {
-            return;
-        }
-        self.hit_events.push(HitEvent {
-            note_id,
-            kind: HitKind::Good {
-                delta: Duration::ZERO,
-                late: false,
-            },
-            // Group chords by *song* time, not arrival time: a stalled frame
-            // delivers several ticks' worth of notes at once, and wall-clock
-            // grouping would fold a whole run into one combo step.
-            chord: Some(self.epoch + song_time),
-        });
     }
 
     fn file_press_key(&mut self, note_id: u8, active: bool) {
@@ -549,27 +594,47 @@ impl PlayAlong {
 mod tests {
     use super::*;
 
-    /// Auto tracks report their notes as flawless hits — but only for keys
-    /// that exist on the keyboard, and never for a track a human is scoring.
-    /// (The human gate lives in `MidiPlayer::update`; range is checked here.)
+    fn note_on(key: u8) -> MidiMessage {
+        MidiMessage::NoteOn {
+            key: key.into(),
+            vel: 90.into(),
+        }
+    }
+
+    /// Jam mode: a target the user matches while it is still live is a Good
+    /// hit with a real timing delta — the machine no longer self-reports.
     #[test]
-    fn auto_press_reports_perfect_hits_for_keys_on_the_keyboard() {
+    fn jam_target_matched_by_user_scores_a_hit() {
         let mut pa = PlayAlong::new(piano_layout::KeyboardRange::standard_88_keys());
 
-        pa.file_auto_press(60, Duration::from_secs(1)); // middle C
-        pa.file_auto_press(5, Duration::from_secs(2)); // below the lowest key: no event
+        pa.midi_event(MidiEventSource::File, &note_on(60));
+        pa.midi_event(MidiEventSource::User, &note_on(60));
 
         let events = pa.take_hit_events();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].note_id, 60);
-        assert!(matches!(
-            events[0].kind,
-            HitKind::Good {
-                delta: Duration::ZERO,
-                late: false,
-            }
-        ));
-        // Grouped by tick timestamp so chords advance the combo once.
+        assert!(matches!(events[0].kind, HitKind::Good { late: true, .. }));
         assert!(events[0].chord.is_some());
+    }
+
+    /// Jam mode: a target nobody plays expires as a silent miss — but only
+    /// when expiry is on (in wait mode the song is stalled on it instead).
+    #[test]
+    fn jam_target_left_alone_expires_as_miss() {
+        let mut pa = PlayAlong::new(piano_layout::KeyboardRange::standard_88_keys());
+
+        pa.midi_event(MidiEventSource::File, &note_on(60));
+
+        pa.update(false);
+        std::thread::sleep(Duration::from_millis(550));
+        pa.update(false); // wait mode: target must survive
+        assert!(pa.take_hit_events().is_empty());
+        assert!(!pa.are_required_keys_pressed());
+
+        pa.update(true); // jam mode: now it expires
+        let events = pa.take_hit_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].note_id, 60);
+        assert!(matches!(events[0].kind, HitKind::Miss));
+        assert!(pa.are_required_keys_pressed());
     }
 }
