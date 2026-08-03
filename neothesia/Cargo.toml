@@ -34,7 +34,7 @@ winit.workspace = true
 rfd.workspace = true
 
 cpal = { workspace = true, optional = true }
-rodio = { version = "0.22", default-features = false, features = ["playback", "vorbis"] }
+rodio = { version = "0.22", default-features = false, features = ["playback", "vorbis", "mp3", "wav"] }
 fluidlite = { workspace = true, optional = true }
 oxisynth = { workspace = true, optional = true }
 

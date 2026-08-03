@@ -253,7 +253,7 @@ impl ApplicationHandler<NeothesiaEvent> for NeothesiaBootstrap {
                 width: 1080.0,
                 height: 720.0,
             })
-            .with_title("Neothesia")
+            .with_title("KEYBOARD HERO")
             .with_min_inner_size(winit::dpi::LogicalSize {
                 width: 670.0,
                 height: 620.0,
@@ -274,7 +274,9 @@ impl ApplicationHandler<NeothesiaEvent> for NeothesiaBootstrap {
                 attributes = attributes.with_activation_token(token);
             }
 
-            attributes = attributes.with_name("com.github.polymeilex.neothesia", "main");
+            // KEYBOARD HERO fork: our own app id, so desktops match windows
+            // to keyboard-hero.desktop (HERO icon) and not upstream's entry.
+            attributes = attributes.with_name("keyboard-hero", "main");
         };
 
         let window = event_loop.create_window(attributes).unwrap();

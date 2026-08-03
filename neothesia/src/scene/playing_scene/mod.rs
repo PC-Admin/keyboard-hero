@@ -25,8 +25,8 @@ use midi_player::{HitKind, MidiPlayer};
 mod effects;
 use effects::EffectsSystem;
 
-mod buzzer;
-use buzzer::FailBuzzer;
+mod sfx;
+use sfx::Sfx;
 
 mod rewind_controller;
 use rewind_controller::RewindController;
@@ -52,7 +52,7 @@ pub struct PlayingScene {
     quad_renderer_fg: QuadRenderer,
     glow: Option<GlowRenderer>,
     effects: EffectsSystem,
-    buzzer: FailBuzzer,
+    sfx: Sfx,
     toast_manager: ToastManager,
 
     nuon: nuon::Ui,
@@ -137,7 +137,7 @@ impl PlayingScene {
             quad_renderer_fg,
             glow,
             effects: EffectsSystem::new(),
-            buzzer: FailBuzzer::new(),
+            sfx: Sfx::new(),
             toast_manager: ToastManager::default(),
 
             nuon: nuon::Ui::new(),
@@ -186,11 +186,10 @@ impl PlayingScene {
         let range_start = self.keyboard.range().start();
         let hit_line_y = pos.y;
 
-        // Scoring is only meaningful in play-along: with every track on Auto
-        // the song plays itself and user presses match nothing, so grading
-        // them (as all-wrong) would just be noise. Drain and ignore. Also
-        // freeze the tallies once the results screen is up.
-        let scoring = self.player.has_human_track() && !self.finished;
+        // Keyboard-hero mode: Auto tracks report their own notes as perfect
+        // hits, so the effects run whether a human is playing or the song is.
+        // Only freeze the tallies once the results screen is up.
+        let scoring = !self.finished;
 
         for e in self.player.take_hit_events() {
             if !scoring {
@@ -243,7 +242,7 @@ impl PlayingScene {
                 }
                 HitKind::Wrong => {
                     self.effects.wrong_hit(cx, hit_line_y);
-                    self.buzzer.trigger();
+                    self.sfx.fail();
                 }
             }
         }
@@ -308,7 +307,11 @@ impl PlayingScene {
             .build(&mut self.nuon);
 
         nuon::label()
-            .text(format!("Best streak: {}", results.best_combo))
+            .text(format!(
+                "SCORE {}    ·    Best streak: {}",
+                effects::thousands(results.score),
+                results.best_combo
+            ))
             .font_size(19.0)
             .color(nuon::Color::new_u8(255, 200, 90, 1.0))
             .y(top + 280.0)
@@ -339,18 +342,30 @@ impl PlayingScene {
             .topbar_expand_animation
             .animate_bool(0.0, 75.0, ctx.frame_timestamp);
 
-        // Without a Human track there is nothing to score — point that out
-        // instead of showing a scoreboard stuck at zero.
-        if !self.player.has_human_track() {
-            nuon::label()
-                .text("Play-along scoring off — set a track to Human in song setup")
-                .font_size(13.0)
-                .color(nuon::Color::new_u8(150, 150, 150, 0.8))
-                .text_justify(nuon::TextJustify::Left)
-                .pos(16.0, hud_top + 10.0)
-                .size(420.0, 13.0)
-                .build(&mut self.nuon);
-            return;
+        // --- top-right performer toggle --------------------------------------
+        // One click hands the song to the machine (AUTO light show) or takes
+        // it back (HUMAN play-along). Tallies keep running across the switch.
+        {
+            let win_w = ctx.window_state.logical_size.width;
+            let human = self.player.has_human_track();
+            let (label, color) = if human {
+                ("HUMAN", nuon::Color::new_u8(160, 81, 238, 1.0))
+            } else {
+                ("AUTO", nuon::Color::new_u8(58, 58, 70, 1.0))
+            };
+
+            let (w, h) = (96.0, 32.0);
+            if nuon::button()
+                .id("performer-toggle")
+                .pos(win_w - w - 16.0, hud_top + 10.0)
+                .size(w, h)
+                .color(color)
+                .border_radius([8.0; 4])
+                .label(label)
+                .build(&mut self.nuon)
+            {
+                self.player.toggle_human();
+            }
         }
 
         // --- top-left streak counter + audience face + dial -----------------
@@ -388,6 +403,16 @@ impl PlayingScene {
                 .text_justify(nuon::TextJustify::Left)
                 .pos(16.0, hud_top + 66.0)
                 .size(160.0, 12.0)
+                .build(&mut self.nuon);
+
+            nuon::label()
+                .text(format!("SCORE {}", effects::thousands(self.effects.score())))
+                .font_size(14.0)
+                .color(nuon::Color::new_u8(255, 222, 84, 1.0))
+                .bold(true)
+                .text_justify(nuon::TextJustify::Left)
+                .pos(16.0, hud_top + 86.0)
+                .size(220.0, 14.0)
                 .build(&mut self.nuon);
 
             // The audience weighs in: a drawn face + speedometer-style dial.
@@ -631,10 +656,12 @@ impl Scene for PlayingScene {
         );
 
         if self.player.is_finished() && !self.player.is_paused() {
-            if self.player.has_human_track() && self.effects.has_activity() && !self.finished {
-                // Play-along run: freeze here and show the results screen.
+            if self.effects.has_activity() && !self.finished {
+                // Anything scored — human or auto — freezes here and gets the
+                // arcade results screen, with the crowd voicing its verdict.
                 self.finished = true;
                 self.player.pause();
+                self.sfx.crowd(self.effects.results().grade().0);
             } else if !self.finished {
                 ctx.proxy
                     .send_event(NeothesiaEvent::MainMenu(Some(self.player.song().clone())))

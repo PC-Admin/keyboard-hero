@@ -226,8 +226,10 @@ impl MenuScene {
         let h = 56.0;
         let gap = 10.0;
 
+        // KEYBOARD HERO banner is a wider lockup than the old one (1208x166),
+        // so keep the width and let the height follow the aspect.
         let logo_w = 650.0;
-        let logo_h = 118.0;
+        let logo_h = 650.0 * 166.0 / 1208.0;
         let post_logo_gap = 24.0;
 
         let menu_top = win_h / 6.0;

@@ -67,6 +67,11 @@ impl MidiPlayer {
     pub fn update(&mut self, delta: Duration) -> Vec<&midi_file::MidiEvent> {
         self.play_along.update();
 
+        // With a Human track present the human is the performer and the
+        // effects grade them alone; only an all-Auto (or Auto+Mute) song
+        // performs for itself.
+        let auto_show = !self.has_human_track();
+
         let events = self.playback.update(delta);
 
         events.iter().for_each(|event| {
@@ -81,6 +86,16 @@ impl MidiPlayer {
                 PlayerConfig::Auto => {
                     self.output // TODO: Send to multiple outputs
                         .midi_event(u4::new(channel), event.message);
+
+                    // Keyboard-hero mode: an Auto track's own notes drive the
+                    // same hit pipeline as a flawless human press, so the
+                    // light show runs even when nobody is playing. Channel 9
+                    // is percussion — its "notes" are drum hits, not keys.
+                    if auto_show && event.channel != 9 {
+                        if let MidiMessage::NoteOn { key, .. } = event.message {
+                            self.play_along.file_auto_press(key.as_int(), event.timestamp);
+                        }
+                    }
                 }
                 PlayerConfig::Human => {
                     self.play_along
@@ -224,6 +239,36 @@ impl MidiPlayer {
         self.play_along.update();
     }
 
+    /// Flip who performs, mid-song. With any Human track set, everything goes
+    /// Auto and the song plays itself; otherwise the first melodic non-drum
+    /// track (the same one the song-setup default picks) becomes Human again.
+    /// Ringing notes are silenced and pending wait-mode targets dropped, so a
+    /// stalled song resumes on the spot instead of waiting for keys that are
+    /// no longer anyone's job.
+    pub fn toggle_human(&mut self) {
+        let make_human = !self.has_human_track();
+
+        self.clear();
+        self.play_along.clear();
+
+        if make_human {
+            let mut assigned = false;
+            for (i, track) in self.song.file.tracks.iter().enumerate() {
+                let is_drums = track.has_drums && !track.has_other_than_drums;
+                if !assigned && !is_drums && !track.notes.is_empty() {
+                    self.song.config.tracks[i].player = PlayerConfig::Human;
+                    assigned = true;
+                }
+            }
+        } else {
+            for track in self.song.config.tracks.iter_mut() {
+                if matches!(track.player, PlayerConfig::Human) {
+                    track.player = PlayerConfig::Auto;
+                }
+            }
+        }
+    }
+
     /// True when at least one track is set to Human, i.e. play-along scoring
     /// is meaningful.
     pub fn has_human_track(&self) -> bool {
@@ -236,7 +281,14 @@ impl MidiPlayer {
 
     pub fn user_midi_event(&mut self, channel: u8, message: &MidiMessage) {
         self.output.midi_event(u4::new(channel), *message);
-        self.play_along.midi_event(MidiEventSource::User, message);
+
+        // In auto mode the machine is the performer and the keyboard is a
+        // free jam over the top — nobody is being graded, so presses must
+        // not be queued for judgement (every one would expire "wrong" 500ms
+        // later and buzz).
+        if self.has_human_track() {
+            self.play_along.midi_event(MidiEventSource::User, message);
+        }
     }
 }
 
@@ -332,6 +384,10 @@ pub struct PlayAlong {
     /// File notes that had NoteOn event, but no NoteOff yet
     in_proggres_file_notes: HashSet<NoteId>,
 
+    /// Fixed origin for mapping song-time onto the `Instant` timeline that
+    /// chord grouping runs on (auto-mode hits only).
+    epoch: Instant,
+
     /// Correct/wrong hit events accumulated since the last frame, drained by
     /// the visual effects system (Guitar-Hero-style sparks & combo).
     hit_events: Vec<HitEvent>,
@@ -346,6 +402,7 @@ impl PlayAlong {
             required_notes: Default::default(),
             user_pressed_recently: Default::default(),
             in_proggres_file_notes: Default::default(),
+            epoch: Instant::now(),
             hit_events: Vec::new(),
             stats: PlayerStats::default(),
         }
@@ -409,6 +466,26 @@ impl PlayAlong {
         }
     }
 
+    /// An Auto track played this note itself. Report it as a perfectly timed
+    /// hit so the effects treat the machine as the player. `song_time` is the
+    /// note's position in the file.
+    fn file_auto_press(&mut self, note_id: u8, song_time: Duration) {
+        if !self.user_keyboard_range.contains(note_id) {
+            return;
+        }
+        self.hit_events.push(HitEvent {
+            note_id,
+            kind: HitKind::Good {
+                delta: Duration::ZERO,
+                late: false,
+            },
+            // Group chords by *song* time, not arrival time: a stalled frame
+            // delivers several ticks' worth of notes at once, and wall-clock
+            // grouping would fold a whole run into one combo step.
+            chord: Some(self.epoch + song_time),
+        });
+    }
+
     fn file_press_key(&mut self, note_id: u8, active: bool) {
         let timestamp = Instant::now();
         if active {
@@ -465,5 +542,34 @@ impl PlayAlong {
 
     pub fn are_required_keys_pressed(&self) -> bool {
         self.required_notes.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Auto tracks report their notes as flawless hits — but only for keys
+    /// that exist on the keyboard, and never for a track a human is scoring.
+    /// (The human gate lives in `MidiPlayer::update`; range is checked here.)
+    #[test]
+    fn auto_press_reports_perfect_hits_for_keys_on_the_keyboard() {
+        let mut pa = PlayAlong::new(piano_layout::KeyboardRange::standard_88_keys());
+
+        pa.file_auto_press(60, Duration::from_secs(1)); // middle C
+        pa.file_auto_press(5, Duration::from_secs(2)); // below the lowest key: no event
+
+        let events = pa.take_hit_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].note_id, 60);
+        assert!(matches!(
+            events[0].kind,
+            HitKind::Good {
+                delta: Duration::ZERO,
+                late: false,
+            }
+        ));
+        // Grouped by tick timestamp so chords advance the combo once.
+        assert!(events[0].chord.is_some());
     }
 }

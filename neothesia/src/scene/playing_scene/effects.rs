@@ -160,9 +160,17 @@ pub struct EffectsSystem {
     total_ok: u32,
     total_wrong: u32,
 
+    /// Arcade score: timing points per note, boosted by the combo multiplier.
+    score: u64,
+
     /// Timer for celebration fireworks on the results screen.
     celebrate_acc: f32,
 }
+
+/// Points per hit, before the combo multiplier.
+const PTS_PERFECT: u64 = 100;
+const PTS_GOOD: u64 = 60;
+const PTS_SLOW: u64 = 20;
 
 /// Whole-song performance summary for the results screen.
 #[derive(Clone, Copy)]
@@ -172,6 +180,7 @@ pub struct Results {
     pub ok: u32,
     pub wrong: u32,
     pub best_combo: u32,
+    pub score: u64,
 }
 
 impl Results {
@@ -264,6 +273,7 @@ impl EffectsSystem {
             total_good: 0,
             total_ok: 0,
             total_wrong: 0,
+            score: 0,
             celebrate_acc: 0.0,
         }
     }
@@ -275,7 +285,12 @@ impl EffectsSystem {
             ok: self.total_ok,
             wrong: self.total_wrong,
             best_combo: self.best_combo,
+            score: self.score,
         }
+    }
+
+    pub fn score(&self) -> u64 {
+        self.score
     }
 
     /// Was this note struck as part of the same chord as the previous one?
@@ -419,6 +434,8 @@ impl EffectsSystem {
             self.combo_pop = 0.0;
             self.record_result(false);
             self.total_ok += 1;
+            // Flat consolation points: the combo just reset, so no multiplier.
+            self.score += PTS_SLOW;
             self.rising.push(RisingText {
                 x: cx,
                 y0: y,
@@ -437,13 +454,17 @@ impl EffectsSystem {
         }
         self.record_result(true);
 
-        if delta_secs <= PERFECT_WINDOW {
+        let pts = if delta_secs <= PERFECT_WINDOW {
             self.total_perfect += 1;
+            PTS_PERFECT
         } else if delta_secs <= GOOD_WINDOW {
             self.total_good += 1;
+            PTS_GOOD
         } else {
             self.total_ok += 1;
-        }
+            PTS_SLOW
+        };
+        self.score += pts * self.multiplier() as u64;
 
         // Timing grade text rising out of the key.
         if delta_secs <= GOOD_WINDOW {
@@ -962,6 +983,19 @@ fn dot(quads: &mut QuadRenderer, x: f32, y: f32, d: f32, color: [f32; 3], a: f32
     });
 }
 
+/// 1234567 -> "1,234,567" for the score displays.
+pub fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
 fn mix(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
     [
         a[0] + (b[0] - a[0]) * t,
@@ -1058,6 +1092,7 @@ mod tests {
             ok,
             wrong,
             best_combo: 0,
+            score: 0,
         }
         .grade()
         .0
@@ -1098,5 +1133,42 @@ mod tests {
     #[test]
     fn empty_run_does_not_divide_by_zero() {
         assert_eq!(run(0, 0, 0, 0), "F");
+    }
+
+    /// Perfect hits earn 100 points, multiplied once the combo passes each
+    /// tier of 10 — so the 10th consecutive hit is the first one worth 200.
+    #[test]
+    fn score_applies_the_combo_multiplier() {
+        let mut fx = EffectsSystem::new();
+        let start = Instant::now();
+
+        for i in 0..10u64 {
+            hit(&mut fx, 60, start + Duration::from_millis(100 * i));
+        }
+
+        assert_eq!(fx.score(), 9 * 100 + 200);
+    }
+
+    /// Every note of a chord scores — the combo counts a chord once, but a
+    /// three-key chord is still worth three notes of points.
+    #[test]
+    fn chord_notes_each_score() {
+        let mut fx = EffectsSystem::new();
+        let chord = Instant::now();
+
+        hit(&mut fx, 60, chord);
+        hit(&mut fx, 64, chord);
+        hit(&mut fx, 67, chord);
+
+        assert_eq!(fx.combo(), 1);
+        assert_eq!(fx.score(), 300);
+    }
+
+    #[test]
+    fn thousands_formats_groups() {
+        assert_eq!(super::thousands(0), "0");
+        assert_eq!(super::thousands(999), "999");
+        assert_eq!(super::thousands(1000), "1,000");
+        assert_eq!(super::thousands(1234567), "1,234,567");
     }
 }
