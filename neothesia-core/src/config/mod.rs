@@ -243,6 +243,14 @@ impl Config {
         self.waterfall.note_labels
     }
 
+    pub fn set_sheet_music(&mut self, show: bool) {
+        self.waterfall.sheet_music = show;
+    }
+
+    pub fn sheet_music(&self) -> bool {
+        self.waterfall.sheet_music
+    }
+
     pub fn speed_multiplier(&self) -> f32 {
         self.playback.speed_multiplier
     }

@@ -31,6 +31,9 @@ pub struct WaterfallConfigV1 {
 
     #[serde(default = "default_note_labels")]
     pub note_labels: bool,
+
+    #[serde(default = "default_sheet_music")]
+    pub sheet_music: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -44,6 +47,7 @@ impl Default for WaterfallConfig {
             animation_speed: default_animation_speed(),
             animation_offset: default_animation_offset(),
             note_labels: default_note_labels(),
+            sheet_music: default_sheet_music(),
         })
     }
 }
@@ -209,6 +213,10 @@ fn default_animation_speed() -> f32 {
 
 fn default_animation_offset() -> f32 {
     0.0
+}
+
+fn default_sheet_music() -> bool {
+    true
 }
 
 fn default_note_labels() -> bool {
