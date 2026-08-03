@@ -462,14 +462,14 @@ impl ScrollState {
         }
     }
 
-    fn value(&self) -> f32 {
+    pub fn value(&self) -> f32 {
         match self {
             ScrollState::Uninitialized => 0.0,
             ScrollState::Ready { value, max, .. } => (*value).clamp(0.0, *max),
         }
     }
 
-    fn set_value(&mut self, v: f32) {
+    pub fn set_value(&mut self, v: f32) {
         match self {
             ScrollState::Uninitialized => {}
             ScrollState::Ready { value, max, .. } => *value = v.clamp(0.0, *max),
@@ -494,7 +494,11 @@ impl ScrollState {
         };
     }
 
-    fn set_max(&mut self, max: f32) {
+    /// Set the scrollable extent. Callers that need to position the view
+    /// before the widget has been built (e.g. to reveal a keyboard-selected
+    /// row) can call this first to initialise the state; [`Scroll::build`]
+    /// sets it again from the measured content.
+    pub fn set_max(&mut self, max: f32) {
         *self = match self {
             ScrollState::Uninitialized => Self::Ready {
                 value: 0.0,

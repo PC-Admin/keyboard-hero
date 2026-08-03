@@ -217,6 +217,13 @@ impl MidiPlayer {
         self.play_along.take_hit_events()
     }
 
+    /// Run play-along housekeeping (wrong-press expiry) without advancing
+    /// playback. Needed while wait-mode has the song stalled: [`Self::update`]
+    /// is skipped then, but mashed wrong keys must still be judged promptly.
+    pub fn tick_play_along(&mut self) {
+        self.play_along.update();
+    }
+
     /// True when at least one track is set to Human, i.e. play-along scoring
     /// is meaningful.
     pub fn has_human_track(&self) -> bool {
@@ -250,10 +257,11 @@ type NoteId = u8;
 /// Result of a play-along key press, consumed by the visual effects system.
 #[derive(Debug, Clone, Copy)]
 pub enum HitKind {
-    /// User played a required note correctly (in time). `delta` is the gap
-    /// between the file note and the user press (early or late) — smaller is
-    /// more accurate.
-    Good { delta: Duration },
+    /// User played a required note correctly. `delta` is the gap between the
+    /// file note and the user press — smaller is more accurate. `late` means
+    /// the press came after the file note, i.e. the song was stalled in
+    /// wait-mode for `delta` before this key finally went down.
+    Good { delta: Duration, late: bool },
     /// User played a note that the song did not ask for (expired unmatched).
     Wrong,
 }
@@ -262,6 +270,11 @@ pub enum HitKind {
 pub struct HitEvent {
     pub note_id: NoteId,
     pub kind: HitKind,
+    /// When the *song* asked for this note, which is what makes it a chord:
+    /// every note of a chord shares this instant no matter how raggedly the
+    /// user rolled it, so the combo can count the chord once. `None` for a
+    /// wrong note — the song never asked for it.
+    pub chord: Option<Instant>,
 }
 
 #[derive(Debug, Default)]
@@ -364,6 +377,7 @@ impl PlayAlong {
             self.hit_events.push(HitEvent {
                 note_id,
                 kind: HitKind::Wrong,
+                chord: None,
             });
         }
     }
@@ -378,7 +392,8 @@ impl PlayAlong {
                 self.stats.played_late.push(delta);
                 self.hit_events.push(HitEvent {
                     note_id,
-                    kind: HitKind::Good { delta },
+                    kind: HitKind::Good { delta, late: true },
+                    chord: Some(required_press.timestamp),
                 });
             } else {
                 // This note was not played by file yet, place it in recents
@@ -403,7 +418,8 @@ impl PlayAlong {
                 self.stats.played_early.push(delta);
                 self.hit_events.push(HitEvent {
                     note_id,
-                    kind: HitKind::Good { delta },
+                    kind: HitKind::Good { delta, late: false },
+                    chord: Some(timestamp),
                 });
             } else {
                 // Player never pressed that note, let it reach required_notes

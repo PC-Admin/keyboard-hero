@@ -25,6 +25,9 @@ use midi_player::{HitKind, MidiPlayer};
 mod effects;
 use effects::EffectsSystem;
 
+mod buzzer;
+use buzzer::FailBuzzer;
+
 mod rewind_controller;
 use rewind_controller::RewindController;
 
@@ -49,6 +52,7 @@ pub struct PlayingScene {
     quad_renderer_fg: QuadRenderer,
     glow: Option<GlowRenderer>,
     effects: EffectsSystem,
+    buzzer: FailBuzzer,
     toast_manager: ToastManager,
 
     nuon: nuon::Ui,
@@ -59,7 +63,7 @@ pub struct PlayingScene {
     top_bar: TopBar,
 
     /// Song ended in play-along mode: show the results screen until the
-    /// player leaves (Enter/Esc).
+    /// player restarts (Enter) or leaves (Backspace/Esc).
     finished: bool,
 }
 
@@ -133,6 +137,7 @@ impl PlayingScene {
             quad_renderer_fg,
             glow,
             effects: EffectsSystem::new(),
+            buzzer: FailBuzzer::new(),
             toast_manager: ToastManager::default(),
 
             nuon: nuon::Ui::new(),
@@ -198,13 +203,15 @@ impl PlayingScene {
             let cx = pos.x + key.x() + key.width() / 2.0;
 
             match e.kind {
-                HitKind::Good { delta } => {
+                HitKind::Good { delta, late } => {
                     self.effects.good_hit(
                         e.note_id,
                         cx,
                         hit_line_y,
                         neutral_w,
                         delta.as_secs_f32(),
+                        late,
+                        e.chord,
                     );
 
                     // Find the note bar being struck (the one crossing the hit
@@ -234,7 +241,10 @@ impl PlayingScene {
                         );
                     }
                 }
-                HitKind::Wrong => self.effects.wrong_hit(cx, hit_line_y),
+                HitKind::Wrong => {
+                    self.effects.wrong_hit(cx, hit_line_y);
+                    self.buzzer.trigger();
+                }
             }
         }
 
@@ -307,7 +317,7 @@ impl PlayingScene {
             .build(&mut self.nuon);
 
         nuon::label()
-            .text("Press Enter for menu")
+            .text("Enter: play again    Backspace: menu")
             .font_size(15.0)
             .color(nuon::Color::new_u8(160, 160, 160, 1.0))
             .y(top + 330.0)
@@ -397,12 +407,13 @@ impl PlayingScene {
             }
         }
 
-        // --- PERFECT / GOOD rising out of the keys --------------------------
+        // --- PERFECT / GOOD / TOO SLOW rising out of the keys ---------------
         for r in self.effects.rising_texts() {
-            let color = if r.perfect {
-                nuon::Color::new_u8(255, 222, 84, r.alpha())
-            } else {
-                nuon::Color::new_u8(196, 255, 196, r.alpha())
+            use effects::RisingGrade;
+            let color = match r.grade {
+                RisingGrade::Perfect => nuon::Color::new_u8(255, 222, 84, r.alpha()),
+                RisingGrade::Good => nuon::Color::new_u8(196, 255, 196, r.alpha()),
+                RisingGrade::Slow => nuon::Color::new_u8(190, 150, 150, r.alpha()),
             };
 
             let size = r.font_size();
@@ -410,7 +421,7 @@ impl PlayingScene {
                 .text(r.text())
                 .font_size(size)
                 .color(color)
-                .bold(r.perfect)
+                .bold(r.grade == RisingGrade::Perfect)
                 .x(r.x() - 90.0)
                 .y(r.y())
                 .size(180.0, size)
@@ -496,6 +507,10 @@ impl PlayingScene {
             let delta = (delta / 10) * (ctx.config.speed_multiplier() * 10.0) as u32;
             let midi_events = self.player.update(delta);
             self.keyboard.file_midi_events(&ctx.config, &midi_events);
+        } else {
+            // Wait-mode stall: playback is frozen, but wrong presses must
+            // still expire and be judged while the song waits.
+            self.player.tick_play_along();
         }
 
         self.player.time_without_lead_in() + ctx.config.animation_offset()
@@ -659,6 +674,12 @@ impl Scene for PlayingScene {
         }
 
         if self.finished && event.key_released(Key::Named(NamedKey::Enter)) {
+            ctx.proxy
+                .send_event(NeothesiaEvent::Play(self.player.song().clone()))
+                .ok();
+        }
+
+        if self.finished && event.key_released(Key::Named(NamedKey::Backspace)) {
             ctx.proxy
                 .send_event(NeothesiaEvent::MainMenu(Some(self.player.song().clone())))
                 .ok();

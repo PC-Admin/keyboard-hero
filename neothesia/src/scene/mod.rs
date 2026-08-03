@@ -245,8 +245,22 @@ fn render_nuon(ui: &mut nuon::Ui, nuon_renderer: &mut NuonRenderer, ctx: &mut Co
             .to_physical::<u32>(ctx.window_state.scale_factor);
         let size = LogicalSize::new(scissor_rect.width(), scissor_rect.height())
             .to_physical::<u32>(ctx.window_state.scale_factor);
-        let scissor_rect =
-            neothesia_core::Rect::new((pos.x, pos.y).into(), (size.width, size.height).into());
+
+        // wgpu treats a scissor rect that leaves the render target as a fatal
+        // validation error, so clamp it here: a layer laid out for a window
+        // bigger than the current surface (a stale frame mid-resize, say)
+        // should clip, not take the whole app down.
+        let target = ctx.window_state.physical_size;
+        let x = pos.x.min(target.width);
+        let y = pos.y.min(target.height);
+        let scissor_rect = neothesia_core::Rect::new(
+            (x, y).into(),
+            (
+                size.width.min(target.width - x),
+                size.height.min(target.height - y),
+            )
+                .into(),
+        );
 
         out.quad_renderer.set_scissor_rect(scissor_rect);
         out.text_renderer.set_scissor_rect(scissor_rect);

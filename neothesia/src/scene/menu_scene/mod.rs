@@ -78,7 +78,16 @@ pub struct MenuScene {
     settings_scroll: nuon::ScrollState,
     favourites: Vec<std::path::PathBuf>,
     fav_selected: usize,
-    fav_scroll_top: usize,
+    fav_scroll: nuon::ScrollState,
+    /// Where the list was last drawn, in window coordinates: the wheel only
+    /// scrolls it while the pointer is inside this. `None` until it has been
+    /// drawn, or while there is nothing to list.
+    fav_viewport: Option<nuon::Rect>,
+    /// Set when the highlight moves, asking the next layout to scroll it back
+    /// into view (which needs the viewport height, only known while drawing).
+    fav_reveal: bool,
+    /// Row index and time of the last favourites click, for double-click detection.
+    fav_last_click: Option<(usize, std::time::Instant)>,
     popup: Popup,
 }
 
@@ -125,7 +134,12 @@ impl MenuScene {
             settings_scroll: nuon::ScrollState::new(),
             favourites,
             fav_selected,
-            fav_scroll_top: 0,
+            fav_scroll: nuon::ScrollState::new(),
+            fav_viewport: None,
+            // The remembered song can be anywhere in the folder, so let the
+            // first layout scroll it into view.
+            fav_reveal: true,
+            fav_last_click: None,
             popup: Popup::None,
         };
 
@@ -250,7 +264,8 @@ impl MenuScene {
                         nuon::translate().y(h + gap + 6.0).add_to_current(ui);
 
                         let list_top = menu_top + logo_h + post_logo_gap + 3.0 * (h + gap) + 6.0;
-                        self.favourites_list_ui(ctx, ui, w, list_top, win_h);
+                        let list_x = win_w / 2.0 - w / 2.0;
+                        self.favourites_list_ui(ctx, ui, w, list_x, list_top, win_w, win_h);
                     });
             });
 
@@ -354,16 +369,20 @@ impl Scene for MenuScene {
 
     fn window_event(&mut self, ctx: &mut Context, event: &WindowEvent) {
         if let WindowEvent::MouseWheel { delta, .. } = event {
-            match delta {
-                winit::event::MouseScrollDelta::LineDelta(_, y) => {
-                    let y = y * 60.0;
-                    self.settings_scroll.update(y);
-                    self.tracks_scroll.update(y);
-                }
-                winit::event::MouseScrollDelta::PixelDelta(position) => {
-                    self.settings_scroll.update(position.y as f32);
-                    self.tracks_scroll.update(position.y as f32);
-                }
+            let amount = match delta {
+                winit::event::MouseScrollDelta::LineDelta(_, y) => y * 60.0,
+                winit::event::MouseScrollDelta::PixelDelta(position) => position.y as f32,
+            };
+
+            let cursor = ctx.window_state.cursor_logical_position;
+            let over_favourites = *self.state.current() == Page::Main
+                && self.favourites_scroll(nuon::Point::new(cursor.x, cursor.y), amount);
+
+            // The favourites list sits on the main page, where neither of
+            // these is visible, but keep the wheel to one list at a time.
+            if !over_favourites {
+                self.settings_scroll.update(amount);
+                self.tracks_scroll.update(amount);
             }
         }
 

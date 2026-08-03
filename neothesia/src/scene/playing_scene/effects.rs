@@ -2,17 +2,19 @@
 //!
 //! On a correct hit we blast a **light pillar** up the note lane, throw a fat
 //! burst of glowing sparks (each with a soft bloom halo), pop a big flash ring
-//! on the key, and bump a running combo / x1..x4 multiplier. Every 10 hits
+//! on the key, and bump a running combo / x1..x4 multiplier — once per chord,
+//! not once per key, since a chord is a single musical event. Every 10 hits
 //! fires a full milestone explosion + screen flash. Pass a 15 streak and the
 //! keyboard is "on fire" — tall ambient flames rise from the hit line. A wrong
-//! note breaks the combo with a grey puff.
+//! note breaks the combo with a grey puff, and so does a note the song had to
+//! stall and wait for (wait-mode catch-ups earn "TOO SLOW", not streak).
 //!
 //! Everything draws as plain rounded quads through the existing foreground
 //! [`QuadRenderer`] (bloom faked with additive-ish translucent halos over the
 //! dark background), so there is no extra GPU pipeline. Nothing fires unless a
 //! track is set to "Human", so ordinary auto-play is untouched.
 
-use std::collections::VecDeque;
+use std::{collections::VecDeque, time::Instant};
 
 use neothesia_core::render::{QuadInstance, QuadRenderer};
 
@@ -21,9 +23,18 @@ const MAX_PARTICLES: usize = 6000;
 const FIRE_COMBO: u32 = 15;
 /// How many recent notes the "audience" judges you on.
 const SENTIMENT_WINDOW: usize = 20;
-/// Hit-timing grades (seconds between the file note and your press).
-const PERFECT_WINDOW: f32 = 0.15;
-const GOOD_WINDOW: f32 = 0.35;
+/// Hit-timing grades (seconds between the file note and your press). Tight on
+/// purpose: at 150ms nearly every landed note read as PERFECT, so a scrappy
+/// run still graded an A. These are still softer than an arcade rhythm game
+/// (~45ms) to leave room for MIDI/audio latency, but they now separate
+/// "in time" from "roughly the right note eventually".
+const PERFECT_WINDOW: f32 = 0.07;
+const GOOD_WINDOW: f32 = 0.16;
+/// Notes the song starts within this of each other are one chord, and so are
+/// worth one combo step between them. Comfortably under a 32nd note at 120bpm
+/// (~62ms), so a fast run still counts note by note; wide enough to absorb a
+/// chord the file itself voices slightly spread.
+const CHORD_WINDOW: std::time::Duration = std::time::Duration::from_millis(30);
 
 #[derive(Clone, Copy, PartialEq)]
 enum Style {
@@ -66,19 +77,32 @@ struct NoteFlash {
     color: [f32; 3],
 }
 
-/// "PERFECT!" / "GOOD" text rising out of the top of a struck key.
+/// Timing tag on a rising text: how the note was struck.
+#[derive(Clone, Copy, PartialEq)]
+pub enum RisingGrade {
+    Perfect,
+    Good,
+    /// Correct key, but only after the song stalled and waited for it.
+    Slow,
+}
+
+/// "PERFECT!" / "GOOD" / "TOO SLOW" text rising out of the top of a struck key.
 pub struct RisingText {
     x: f32,
     /// Key top (hit line) — the text rises up from here.
     y0: f32,
     age: f32,
     life: f32,
-    pub perfect: bool,
+    pub grade: RisingGrade,
 }
 
 impl RisingText {
     pub fn text(&self) -> &'static str {
-        if self.perfect { "PERFECT!" } else { "GOOD" }
+        match self.grade {
+            RisingGrade::Perfect => "PERFECT!",
+            RisingGrade::Good => "GOOD",
+            RisingGrade::Slow => "TOO SLOW",
+        }
     }
 
     pub fn x(&self) -> f32 {
@@ -86,7 +110,11 @@ impl RisingText {
     }
 
     pub fn y(&self) -> f32 {
-        let rise = if self.perfect { 110.0 } else { 80.0 };
+        let rise = match self.grade {
+            RisingGrade::Perfect => 110.0,
+            RisingGrade::Good => 80.0,
+            RisingGrade::Slow => 55.0,
+        };
         self.y0 - 24.0 - self.age * rise
     }
 
@@ -95,7 +123,11 @@ impl RisingText {
     }
 
     pub fn font_size(&self) -> f32 {
-        let base = if self.perfect { 24.0 } else { 19.0 };
+        let base = if self.grade == RisingGrade::Perfect {
+            24.0
+        } else {
+            19.0
+        };
         // Quick pop at birth.
         base * (1.0 + 0.35 * (1.0 - (self.age * 6.0).min(1.0)))
     }
@@ -113,6 +145,10 @@ pub struct EffectsSystem {
     best_combo: u32,
     combo_pop: f32,
     ember_acc: f32,
+
+    /// Song-time of the chord the last correct hit belonged to, so the notes
+    /// of one chord advance the combo once between them.
+    last_chord: Option<Instant>,
 
     /// Smoothed 0..1 sentiment shown by the dial needle (eases toward the
     /// rolling accuracy so it sweeps like a real gauge).
@@ -154,22 +190,24 @@ impl Results {
     /// Timing-weighted performance score in 0..1. Accuracy alone is too easy
     /// in wait-mode (the song waits for you, so avoiding wrong notes is most
     /// of it) — the grade should reward *precision*: a PERFECT is full
-    /// credit, a GOOD is most of it, a slow OK hit only half, a wrong note
-    /// nothing.
+    /// credit, a GOOD most of it, and a hit the song had to stall and wait
+    /// for earns very little. Wrong notes cost more than the note they
+    /// occupy, so flailing can't be papered over by volume of right notes.
     pub fn performance(&self) -> f32 {
         let total = self.total_hit() + self.wrong;
         if total == 0 {
             return 0.0;
         }
-        let weighted =
-            self.perfect as f32 * 1.0 + self.good as f32 * 0.85 + self.ok as f32 * 0.55;
-        weighted / total as f32
+        let weighted = self.perfect as f32 * 1.0 + self.good as f32 * 0.75 + self.ok as f32 * 0.25;
+        let penalty = self.wrong as f32 * 0.5;
+        ((weighted - penalty) / total as f32).clamp(0.0, 1.0)
     }
 
     /// Arcade letter grade with its display colour, from the performance
     /// score. Fine-grained ladder from A++ (near-flawless, gold) down to F.
-    /// All-PERFECT play is an A++; clean all-GOOD play sits near A-;
-    /// slow-but-correct play lands in the C range.
+    /// An A now has to be earned on timing: all-PERFECT play is an A++,
+    /// clean all-GOOD play tops out around B, and a run the song spent its
+    /// time waiting for is a D — the grade you'd give yourself.
     pub fn grade(&self) -> (&'static str, (u8, u8, u8)) {
         const GOLD: (u8, u8, u8) = (255, 200, 40);
         const GREEN: (u8, u8, u8) = (80, 220, 90);
@@ -179,18 +217,18 @@ impl Results {
         const RED: (u8, u8, u8) = (225, 55, 50);
 
         const LADDER: [(f32, &str, (u8, u8, u8)); 12] = [
-            (0.97, "A++", GOLD),
-            (0.93, "A+", GREEN),
-            (0.88, "A", GREEN),
-            (0.84, "A-", GREEN),
-            (0.79, "B+", BLUE),
-            (0.73, "B", BLUE),
-            (0.67, "B-", BLUE),
-            (0.61, "C+", ORANGE),
-            (0.55, "C", ORANGE),
-            (0.48, "C-", ORANGE),
-            (0.40, "D+", RED_ORANGE),
-            (0.30, "D", RED_ORANGE),
+            (0.98, "A++", GOLD),
+            (0.95, "A+", GREEN),
+            (0.91, "A", GREEN),
+            (0.87, "A-", GREEN),
+            (0.82, "B+", BLUE),
+            (0.76, "B", BLUE),
+            (0.70, "B-", BLUE),
+            (0.63, "C+", ORANGE),
+            (0.56, "C", ORANGE),
+            (0.49, "C-", ORANGE),
+            (0.41, "D+", RED_ORANGE),
+            (0.32, "D", RED_ORANGE),
         ];
 
         let score = self.performance();
@@ -204,7 +242,7 @@ impl Results {
 
     /// Does this performance deserve fireworks? (A- or better.)
     pub fn celebratory(&self) -> bool {
-        self.performance() >= 0.84
+        self.performance() >= 0.87
     }
 }
 
@@ -220,6 +258,7 @@ impl EffectsSystem {
             best_combo: 0,
             combo_pop: 0.0,
             ember_acc: 0.0,
+            last_chord: None,
             sentiment_display: 0.5,
             total_perfect: 0,
             total_good: 0,
@@ -237,6 +276,21 @@ impl EffectsSystem {
             wrong: self.total_wrong,
             best_combo: self.best_combo,
         }
+    }
+
+    /// Was this note struck as part of the same chord as the previous one?
+    /// Compares when the *song* asked for the two notes, not when they were
+    /// played, so a chord rolled by the user still reads as one chord.
+    fn is_same_chord(&self, chord: Option<Instant>) -> bool {
+        let (Some(chord), Some(last)) = (chord, self.last_chord) else {
+            return false;
+        };
+        let gap = if chord >= last {
+            chord - last
+        } else {
+            last - chord
+        };
+        gap <= CHORD_WINDOW
     }
 
     /// Rolling accuracy over the sentiment window, if anything was played.
@@ -339,11 +393,48 @@ impl EffectsSystem {
 
     /// Correct note. `cx` = key centre, `y` = hit line (keyboard top, which is
     /// also the height of the note lane above it), `key_w` = white-key width,
-    /// `delta_secs` = timing gap between the file note and the press.
-    pub fn good_hit(&mut self, note_id: u8, cx: f32, y: f32, key_w: f32, delta_secs: f32) {
-        self.combo += 1;
-        self.best_combo = self.best_combo.max(self.combo);
-        self.combo_pop = 1.0;
+    /// `delta_secs` = timing gap between the file note and the press, `late` =
+    /// the press came after the file note (wait-mode stalled for it), `chord` =
+    /// when the song asked for the note, shared by every note of a chord.
+    pub fn good_hit(
+        &mut self,
+        note_id: u8,
+        cx: f32,
+        y: f32,
+        key_w: f32,
+        delta_secs: f32,
+        late: bool,
+        chord: Option<Instant>,
+    ) {
+        // A chord is one musical event, so it is worth one combo step however
+        // many keys it puts down. Sparks, flashes and per-note timing tallies
+        // still fire per key — only the streak counts the chord once.
+        let first_in_chord = !self.is_same_chord(chord);
+        self.last_chord = chord;
+
+        // The song visibly stalled and waited for this key — right note, but
+        // no combo credit and the audience is not impressed.
+        if late && delta_secs > GOOD_WINDOW {
+            self.combo = 0;
+            self.combo_pop = 0.0;
+            self.record_result(false);
+            self.total_ok += 1;
+            self.rising.push(RisingText {
+                x: cx,
+                y0: y,
+                age: 0.0,
+                life: 0.9,
+                grade: RisingGrade::Slow,
+            });
+            self.puff(cx, y, [0.28, 0.28, 0.32]);
+            return;
+        }
+
+        if first_in_chord {
+            self.combo += 1;
+            self.best_combo = self.best_combo.max(self.combo);
+            self.combo_pop = 1.0;
+        }
         self.record_result(true);
 
         if delta_secs <= PERFECT_WINDOW {
@@ -361,13 +452,19 @@ impl EffectsSystem {
                 y0: y,
                 age: 0.0,
                 life: 0.9,
-                perfect: delta_secs <= PERFECT_WINDOW,
+                grade: if delta_secs <= PERFECT_WINDOW {
+                    RisingGrade::Perfect
+                } else {
+                    RisingGrade::Good
+                },
             });
         }
 
         let mult = self.multiplier() as f32;
         let base = note_linear_color(note_id);
-        let milestone = self.combo % 10 == 0;
+        // Only the note that actually advanced the combo can trip a milestone,
+        // or a chord landing on one would fire the explosion once per key.
+        let milestone = first_in_chord && self.combo % 10 == 0;
 
         // 1) Soft light pillar up the note lane.
         if self.room() {
@@ -486,7 +583,11 @@ impl EffectsSystem {
         self.combo_pop = 0.0;
         self.record_result(false);
         self.total_wrong += 1;
+        self.puff(cx, y, [0.4, 0.07, 0.07]);
+    }
 
+    /// Small dark puff at the key — the anti-celebration.
+    fn puff(&mut self, cx: f32, y: f32, color: [f32; 3]) {
         for _ in 0..14 {
             if !self.room() {
                 break;
@@ -505,7 +606,7 @@ impl EffectsSystem {
                 max_life: life,
                 size,
                 length: 0.0,
-                color: [0.4, 0.07, 0.07],
+                color,
                 gravity: GRAVITY * 0.7,
                 style: Style::Puff,
             });
@@ -867,4 +968,135 @@ fn mix(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
         a[1] + (b[1] - a[1]) * t,
         a[2] + (b[2] - a[2]) * t,
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EffectsSystem, Results};
+    use std::time::{Duration, Instant};
+
+    /// Strike a correct, well-timed note that the song asked for at `chord`.
+    fn hit(fx: &mut EffectsSystem, note: u8, chord: Instant) {
+        fx.good_hit(note, 0.0, 100.0, 20.0, 0.01, false, Some(chord));
+    }
+
+    /// Three keys down for one chord is one musical event, so one combo step —
+    /// however ragged the hands were about it.
+    #[test]
+    fn a_chord_advances_the_combo_once() {
+        let mut fx = EffectsSystem::new();
+        let chord = Instant::now();
+
+        hit(&mut fx, 60, chord);
+        hit(&mut fx, 64, chord);
+        hit(&mut fx, 67, chord);
+
+        assert_eq!(fx.combo(), 1);
+        assert_eq!(fx.best_combo(), 1);
+    }
+
+    /// The song voicing a chord a few ms wide, or the player rolling it, must
+    /// not turn one chord into several combo steps.
+    #[test]
+    fn a_rolled_chord_is_still_one_chord() {
+        let mut fx = EffectsSystem::new();
+        let chord = Instant::now();
+
+        hit(&mut fx, 60, chord);
+        hit(&mut fx, 64, chord + Duration::from_millis(12));
+        hit(&mut fx, 67, chord + Duration::from_millis(25));
+
+        assert_eq!(fx.combo(), 1);
+    }
+
+    /// Separate notes stay separate — a fast run must still build a streak.
+    #[test]
+    fn consecutive_notes_each_advance_the_combo() {
+        let mut fx = EffectsSystem::new();
+        let start = Instant::now();
+
+        for (i, note) in [60u8, 62, 64, 65].into_iter().enumerate() {
+            hit(&mut fx, note, start + Duration::from_millis(100 * i as u64));
+        }
+
+        assert_eq!(fx.combo(), 4);
+    }
+
+    /// 32nd notes at 120bpm are ~62ms apart and are not a chord.
+    #[test]
+    fn fast_runs_are_not_mistaken_for_chords() {
+        let mut fx = EffectsSystem::new();
+        let start = Instant::now();
+
+        hit(&mut fx, 60, start);
+        hit(&mut fx, 62, start + Duration::from_millis(62));
+
+        assert_eq!(fx.combo(), 2);
+    }
+
+    /// Chords count once, but each key is still judged on its own timing —
+    /// the streak changes, the note tallies do not.
+    #[test]
+    fn chord_notes_are_still_scored_individually() {
+        let mut fx = EffectsSystem::new();
+        let chord = Instant::now();
+
+        hit(&mut fx, 60, chord);
+        hit(&mut fx, 64, chord);
+        hit(&mut fx, 67, chord);
+
+        let results = fx.results();
+        assert_eq!(fx.combo(), 1);
+        assert_eq!(results.perfect, 3);
+        assert_eq!(results.total_hit(), 3);
+    }
+
+    fn run(perfect: u32, good: u32, ok: u32, wrong: u32) -> &'static str {
+        Results {
+            perfect,
+            good,
+            ok,
+            wrong,
+            best_combo: 0,
+        }
+        .grade()
+        .0
+    }
+
+    /// The grade ladder is only meaningful if these stay pinned: an A has to
+    /// mean "played in time", not "eventually hit the right keys".
+    #[test]
+    fn grades_reward_timing_not_just_correctness() {
+        // Flawless timing is the only way to the top of the ladder.
+        assert_eq!(run(100, 0, 0, 0), "A++");
+        assert_eq!(run(85, 12, 2, 1), "A");
+
+        // Right notes, consistently a beat behind: respectable, not an A.
+        assert_eq!(run(0, 100, 0, 0), "B-");
+
+        // Loose but competent.
+        assert_eq!(run(60, 25, 10, 5), "B");
+
+        // A scrappy run — sloppy timing plus a lot of wrong notes.
+        assert_eq!(run(27, 28, 25, 20), "D+");
+
+        // The song stalled and waited for every single note. That is not a
+        // performance, and it should not flatter one.
+        assert_eq!(run(0, 0, 100, 0), "F");
+    }
+
+    /// Wrong notes have to cost more than the slot they take up, or spraying
+    /// extra notes is nearly free as long as the right ones land too.
+    #[test]
+    fn wrong_notes_are_penalised_beyond_dilution() {
+        // Same 100 perfectly-timed notes each time; only the spray changes.
+        assert_eq!(run(100, 0, 0, 0), "A++");
+        assert_eq!(run(100, 0, 0, 20), "B-");
+        assert_eq!(run(100, 0, 0, 50), "C-");
+    }
+
+    #[test]
+    fn empty_run_does_not_divide_by_zero() {
+        assert_eq!(run(0, 0, 0, 0), "F");
+    }
 }
