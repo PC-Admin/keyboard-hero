@@ -337,6 +337,13 @@ pub enum MidiEventSource {
     User,
 }
 
+/// How long a note stays live for matching, in both directions: a key pressed
+/// this far ahead of the song still counts as playing that note, and a target
+/// the song asked for stays hittable this long before it expires (a wrong
+/// note, or in jam mode a miss). Generous on purpose — anticipating a note
+/// slightly is playing, not flailing.
+const MATCH_LEEWAY: Duration = Duration::from_millis(700);
+
 fn should_forward_human_event(message: &MidiMessage) -> bool {
     !matches!(
         message,
@@ -393,14 +400,14 @@ impl PlayerStats {
     }
 
     fn count_too_early(&self) -> usize {
-        // 500 is the same as expire time, so this does not make much sense, but we can chooses
-        // better threshold later down the line
-        Self::count_with_threshold(&self.played_early, Duration::from_millis(500))
+        // Same as expire time, so this does not make much sense, but we can choose
+        // a better threshold later down the line
+        Self::count_with_threshold(&self.played_early, MATCH_LEEWAY)
     }
 
     fn count_too_late(&self) -> usize {
-        // 160 to forgive touching the bottom
-        Self::count_with_threshold(&self.played_late, Duration::from_millis(160))
+        // 280 to forgive touching the bottom (matches the GOOD timing window)
+        Self::count_with_threshold(&self.played_late, Duration::from_millis(280))
     }
 
     fn count_with_threshold(events: &[Duration], threshold: Duration) -> usize {
@@ -460,7 +467,7 @@ impl PlayAlong {
     fn update(&mut self, expire_required: bool) {
         // Instead of calling .elapsed() per item let's fetch `now` once, and subtract it ourselves
         let now = Instant::now();
-        let threshold = Duration::from_millis(500);
+        let threshold = MATCH_LEEWAY;
 
         // Retain only the items that are within the threshold; anything that
         // expired unmatched was a wrong note.
@@ -625,7 +632,7 @@ mod tests {
         pa.midi_event(MidiEventSource::File, &note_on(60));
 
         pa.update(false);
-        std::thread::sleep(Duration::from_millis(550));
+        std::thread::sleep(MATCH_LEEWAY + Duration::from_millis(50));
         pa.update(false); // wait mode: target must survive
         assert!(pa.take_hit_events().is_empty());
         assert!(!pa.are_required_keys_pressed());

@@ -24,13 +24,19 @@ const MAX_PARTICLES: usize = 6000;
 const FIRE_COMBO: u32 = 15;
 /// How many recent notes the "audience" judges you on.
 const SENTIMENT_WINDOW: usize = 20;
-/// Hit-timing grades (seconds between the file note and your press). Tight on
-/// purpose: at 150ms nearly every landed note read as PERFECT, so a scrappy
-/// run still graded an A. These are still softer than an arcade rhythm game
-/// (~45ms) to leave room for MIDI/audio latency, but they now separate
-/// "in time" from "roughly the right note eventually".
-const PERFECT_WINDOW: f32 = 0.07;
-const GOOD_WINDOW: f32 = 0.16;
+/// Hit-timing grades (seconds between the file note and your press). Wide
+/// enough that a human sight-reading on a real keyboard can land PERFECTs:
+/// MIDI/audio latency alone eats tens of ms before your playing is judged at
+/// all. They still separate "in time" from "roughly the right note
+/// eventually" — a note only stops being GOOD once it is a noticeable beat
+/// behind.
+const PERFECT_WINDOW: f32 = 0.12;
+const GOOD_WINDOW: f32 = 0.28;
+/// Wait-mode only: how long the song may sit stalled on a note before the
+/// eventual catch-up stops counting as playing it and becomes "TOO SLOW"
+/// (combo break, near-zero credit). Reaction time to a note you did not see
+/// coming is a few hundred ms, so the cutoff has to sit above that.
+const SLOW_WINDOW: f32 = 0.45;
 /// Notes the song starts within this of each other are one chord, and so are
 /// worth one combo step between them. Comfortably under a 32nd note at 120bpm
 /// (~62ms), so a fast run still counts note by note; wide enough to absorb a
@@ -175,6 +181,15 @@ const PTS_PERFECT: u64 = 100;
 const PTS_GOOD: u64 = 60;
 const PTS_SLOW: u64 = 20;
 
+/// Credit each kind of note earns toward the performance score, and what a
+/// mistake costs. A GOOD is worth nearly a PERFECT — landing the note is the
+/// hard part — while a note the song had to stall and wait for is worth
+/// little, and a note nobody played at all only counts half against you.
+const W_GOOD: f32 = 0.80;
+const W_OK: f32 = 0.35;
+const W_WRONG_PENALTY: f32 = 0.40;
+const MISS_WEIGHT: f32 = 0.5;
+
 /// Whole-song performance summary for the results screen.
 #[derive(Clone, Copy)]
 pub struct Results {
@@ -202,26 +217,34 @@ impl Results {
 
     /// Timing-weighted performance score in 0..1. Accuracy alone is too easy
     /// in wait-mode (the song waits for you, so avoiding wrong notes is most
-    /// of it) — the grade should reward *precision*: a PERFECT is full
-    /// credit, a GOOD most of it, and a hit the song had to stall and wait
-    /// for earns very little. Wrong notes cost more than the note they
+    /// of it) — the grade should still reward *precision*: a PERFECT is full
+    /// credit, a GOOD nearly all of it, and a hit the song had to stall and
+    /// wait for earns little. Wrong notes cost more than the note they
     /// occupy, so flailing can't be papered over by volume of right notes.
+    ///
+    /// Notes nobody played count for *half* a note against you rather than a
+    /// whole one: in the jam modes the song is playing itself and you are
+    /// playing over it, so sitting out a phrase should cost less than
+    /// fumbling it.
     pub fn performance(&self) -> f32 {
-        let total = self.total_hit() + self.wrong + self.missed;
-        if total == 0 {
+        let total = self.total_hit() as f32 + self.wrong as f32 + self.missed as f32 * MISS_WEIGHT;
+        if total <= 0.0 {
             return 0.0;
         }
         // A miss is a zero-credit attempt; a wrong note costs extra on top.
-        let weighted = self.perfect as f32 * 1.0 + self.good as f32 * 0.75 + self.ok as f32 * 0.25;
-        let penalty = self.wrong as f32 * 0.5;
-        ((weighted - penalty) / total as f32).clamp(0.0, 1.0)
+        let weighted =
+            self.perfect as f32 * 1.0 + self.good as f32 * W_GOOD + self.ok as f32 * W_OK;
+        let penalty = self.wrong as f32 * W_WRONG_PENALTY;
+        ((weighted - penalty) / total).clamp(0.0, 1.0)
     }
 
     /// Arcade letter grade with its display colour, from the performance
-    /// score. Fine-grained ladder from A++ (near-flawless, gold) down to F.
-    /// An A now has to be earned on timing: all-PERFECT play is an A++,
-    /// clean all-GOOD play tops out around B, and a run the song spent its
-    /// time waiting for is a D — the grade you'd give yourself.
+    /// score. Fine-grained ladder from A++ (flawless, gold) down to F. An A
+    /// still has to be earned on timing, but the ladder is pitched so that
+    /// playing a song *well* lands in the A/B range rather than the C's:
+    /// clean all-GOOD play is an A-, a competent run with a few fumbles is a
+    /// B, and only a run the song spent its whole time waiting for lands in
+    /// the D's.
     pub fn grade(&self) -> (&'static str, (u8, u8, u8)) {
         const GOLD: (u8, u8, u8) = (255, 200, 40);
         const GREEN: (u8, u8, u8) = (80, 220, 90);
@@ -231,18 +254,18 @@ impl Results {
         const RED: (u8, u8, u8) = (225, 55, 50);
 
         const LADDER: [(f32, &str, (u8, u8, u8)); 12] = [
-            (0.98, "A++", GOLD),
-            (0.95, "A+", GREEN),
-            (0.91, "A", GREEN),
-            (0.87, "A-", GREEN),
-            (0.82, "B+", BLUE),
-            (0.76, "B", BLUE),
-            (0.70, "B-", BLUE),
-            (0.63, "C+", ORANGE),
-            (0.56, "C", ORANGE),
-            (0.49, "C-", ORANGE),
-            (0.41, "D+", RED_ORANGE),
-            (0.32, "D", RED_ORANGE),
+            (0.96, "A++", GOLD),
+            (0.90, "A+", GREEN),
+            (0.84, "A", GREEN),
+            (0.78, "A-", GREEN),
+            (0.72, "B+", BLUE),
+            (0.65, "B", BLUE),
+            (0.58, "B-", BLUE),
+            (0.51, "C+", ORANGE),
+            (0.44, "C", ORANGE),
+            (0.37, "C-", ORANGE),
+            (0.29, "D+", RED_ORANGE),
+            (0.21, "D", RED_ORANGE),
         ];
 
         let score = self.performance();
@@ -256,7 +279,7 @@ impl Results {
 
     /// Does this performance deserve fireworks? (A- or better.)
     pub fn celebratory(&self) -> bool {
-        self.performance() >= 0.87
+        self.performance() >= 0.78
     }
 }
 
@@ -399,15 +422,15 @@ impl EffectsSystem {
 
         let accuracy = self.accuracy()?;
 
-        Some(if accuracy >= 0.95 && self.recent.len() >= 10 {
+        Some(if accuracy >= 0.88 && self.recent.len() >= 10 {
             5
-        } else if accuracy >= 0.85 {
+        } else if accuracy >= 0.75 {
             4
-        } else if accuracy >= 0.7 {
+        } else if accuracy >= 0.60 {
             3
-        } else if accuracy >= 0.5 {
+        } else if accuracy >= 0.42 {
             2
-        } else if accuracy >= 0.3 {
+        } else if accuracy >= 0.25 {
             1
         } else {
             0
@@ -437,9 +460,11 @@ impl EffectsSystem {
         let first_in_chord = !self.is_same_chord(chord);
         self.last_chord = chord;
 
-        // The song visibly stalled and waited for this key — right note, but
-        // no combo credit and the audience is not impressed.
-        if late && delta_secs > GOOD_WINDOW {
+        // The song sat there waiting for this key long enough that it read as
+        // a stall, not as playing — right note, but no combo credit and the
+        // audience is not impressed. A merely-behind catch-up inside
+        // [`SLOW_WINDOW`] keeps its streak; only real dawdling breaks it.
+        if late && delta_secs > SLOW_WINDOW {
             self.combo = 0;
             self.combo_pop = 0.0;
             self.record_result(false);
@@ -1133,25 +1158,26 @@ mod tests {
     }
 
     /// The grade ladder is only meaningful if these stay pinned: an A has to
-    /// mean "played in time", not "eventually hit the right keys".
+    /// mean "played in time", not "eventually hit the right keys" — but
+    /// playing a song *well* has to actually land in the A/B range.
     #[test]
     fn grades_reward_timing_not_just_correctness() {
-        // Flawless timing is the only way to the top of the ladder.
+        // Flawless timing is the only way to the very top of the ladder.
         assert_eq!(run(100, 0, 0, 0), "A++");
-        assert_eq!(run(85, 12, 2, 1), "A");
+        assert_eq!(run(85, 12, 2, 1), "A+");
 
-        // Right notes, consistently a beat behind: respectable, not an A.
-        assert_eq!(run(0, 100, 0, 0), "B-");
+        // Right notes, consistently a shade behind: a clean performance.
+        assert_eq!(run(0, 100, 0, 0), "A-");
 
         // Loose but competent.
-        assert_eq!(run(60, 25, 10, 5), "B");
+        assert_eq!(run(60, 25, 10, 5), "A-");
 
         // A scrappy run — sloppy timing plus a lot of wrong notes.
-        assert_eq!(run(27, 28, 25, 20), "D+");
+        assert_eq!(run(27, 28, 25, 20), "C");
 
         // The song stalled and waited for every single note. That is not a
         // performance, and it should not flatter one.
-        assert_eq!(run(0, 0, 100, 0), "F");
+        assert_eq!(run(0, 0, 100, 0), "D+");
     }
 
     /// Wrong notes have to cost more than the slot they take up, or spraying
@@ -1160,8 +1186,8 @@ mod tests {
     fn wrong_notes_are_penalised_beyond_dilution() {
         // Same 100 perfectly-timed notes each time; only the spray changes.
         assert_eq!(run(100, 0, 0, 0), "A++");
-        assert_eq!(run(100, 0, 0, 20), "B-");
-        assert_eq!(run(100, 0, 0, 50), "C-");
+        assert_eq!(run(100, 0, 0, 20), "B+");
+        assert_eq!(run(100, 0, 0, 50), "C+");
     }
 
     #[test]
@@ -1170,13 +1196,16 @@ mod tests {
     }
 
     /// Misses are zero-credit attempts: they dilute the grade like wrong
-    /// notes but without the extra penalty, and playing nothing at all in
-    /// jam mode is an F — though the results screen never shows for it,
-    /// because misses alone are not activity.
+    /// notes but at half weight and without the extra penalty, so sitting
+    /// out part of a jam costs less than fumbling it. Playing nothing at all
+    /// in jam mode is still an F — though the results screen never shows for
+    /// it, because misses alone are not activity.
     #[test]
     fn misses_dilute_the_grade_without_extra_penalty() {
         assert_eq!(run_with_misses(100, 0), "A++");
-        assert_eq!(run_with_misses(90, 10), "A-");
+        assert_eq!(run_with_misses(90, 10), "A+");
+        // Jamming along with half the notes is a solid showing, not a fail.
+        assert_eq!(run_with_misses(50, 50), "B");
         assert_eq!(run_with_misses(0, 100), "F");
 
         let mut fx = EffectsSystem::new();
