@@ -247,6 +247,32 @@ impl MenuScene {
                     .x(-w / 2.0)
                     .y(logo_h + post_logo_gap)
                     .build(ui, |ui| {
+                        // Favourites sit between the logo and the buttons.
+                        // They take only the room they need, capped at what
+                        // is left once the buttons and bottom bar have
+                        // theirs — so a long folder scrolls rather than
+                        // pushing the menu off screen.
+                        let list_x = win_w / 2.0 - w / 2.0;
+                        let list_top = menu_top + logo_h + post_logo_gap;
+                        let list_gap = 16.0;
+
+                        let buttons_h = 3.0 * h + 2.0 * gap;
+                        let list_room =
+                            win_h - favourites::BOTTOM_RESERVED - buttons_h - list_gap - list_top;
+                        let list_h = self.favourites_preferred_height().min(list_room.max(0.0));
+
+                        // Scoped: the list advances the origin as it draws,
+                        // and the buttons below need a known starting point.
+                        nuon::translate().build(ui, |ui| {
+                            let area = nuon::Rect::new(
+                                nuon::Point::new(list_x, list_top),
+                                nuon::Size::new(w, list_h),
+                            );
+                            self.favourites_list_ui(ctx, ui, area, win_w, win_h);
+                        });
+
+                        nuon::translate().y(list_h + list_gap).add_to_current(ui);
+
                         if neo_btn().size(w, h).label("Select File").build(ui) {
                             self.futures.push(open_midi_file_picker(&mut self.state));
                         }
@@ -262,12 +288,6 @@ impl MenuScene {
                         if neo_btn().size(w, h).label("Exit").build(ui) {
                             self.state.go_back();
                         }
-
-                        nuon::translate().y(h + gap + 6.0).add_to_current(ui);
-
-                        let list_top = menu_top + logo_h + post_logo_gap + 3.0 * (h + gap) + 6.0;
-                        let list_x = win_w / 2.0 - w / 2.0;
-                        self.favourites_list_ui(ctx, ui, w, list_x, list_top, win_w, win_h);
                     });
             });
 

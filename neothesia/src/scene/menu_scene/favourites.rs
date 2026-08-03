@@ -28,11 +28,14 @@ const CAPTION_H: f32 = 18.0;
 /// Width nuon's scroll widget draws its bar at, plus breathing room, kept
 /// clear on the right of each row so text never runs under the bar.
 const SCROLLBAR_W: f32 = 14.0;
+/// Rows shown before the list starts scrolling instead of growing. Keeps the
+/// menu compact on a big screen — the rest is a wheel-scroll away.
+const PREFERRED_ROWS: usize = 9;
 /// How close together two clicks on the same row have to be to count as a
 /// double-click and start the song.
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 /// Space kept free for the bottom bar (song title + play/freeplay buttons).
-const BOTTOM_RESERVED: f32 = 92.0;
+pub const BOTTOM_RESERVED: f32 = 92.0;
 
 /// Collect and alphabetically sort the .mid/.midi files in the favourites dir.
 pub fn scan_favourites() -> Vec<PathBuf> {
@@ -67,21 +70,30 @@ pub fn scan_favourites() -> Vec<PathBuf> {
 }
 
 impl super::MenuScene {
-    /// Draw the list at the current translate origin (directly under the Exit
-    /// button). `list_x`/`list_top` are that origin in absolute window
-    /// coordinates, which the wheel handler needs to hit-test the pointer
-    /// against the list, and which decide whether the window still has room
-    /// to show it at all.
+    /// Space the list would like: the caption plus up to [`PREFERRED_ROWS`]
+    /// rows. The caller caps this again against what the window can spare,
+    /// so a short folder takes only the room it needs, and a long one
+    /// scrolls rather than swallowing the screen.
+    pub fn favourites_preferred_height(&self) -> f32 {
+        CAPTION_H + self.favourites.len().min(PREFERRED_ROWS) as f32 * ROW_PITCH
+    }
+
+    /// Draw the list. `area` is where it goes in absolute window
+    /// coordinates, covering the caption and the rows below it — its origin
+    /// must match the current translate origin. Absolute because the wheel
+    /// handler hit-tests the pointer against the same rect, and because
+    /// whether the window can fit it at all is decided here.
     pub fn favourites_list_ui(
         &mut self,
         ctx: &mut Context,
         ui: &mut nuon::Ui,
-        w: f32,
-        list_x: f32,
-        list_top: f32,
+        area: nuon::Rect,
         win_w: f32,
         win_h: f32,
     ) {
+        let w = area.size.width;
+        let list_x = area.origin.x;
+        let list_top = area.origin.y;
         let count = self.favourites.len();
 
         let caption = if count == 0 {
@@ -109,16 +121,21 @@ impl super::MenuScene {
             self.fav_selected = count - 1;
         }
 
-        // The list gets everything between the caption and the bottom bar.
+        // Rows fill whatever the caller left below the caption.
         let view_top = list_top + CAPTION_H;
-        let view_h = win_h - BOTTOM_RESERVED - view_top;
+        let view_h = area.size.height - CAPTION_H;
 
         // A scissor rect hanging off the window is a fatal wgpu validation
-        // error, not a clipped draw, so when the window is too small to hold
-        // the list, drop it rather than clamp it to something that overflows.
-        // Nothing is lost: at that size the menu buttons above have already
-        // run out of room, and the arrow keys still work.
-        if view_h < ROW_H || view_top < 0.0 || list_x < 0.0 || list_x + w > win_w {
+        // error, not a clipped draw, so when there is not room for the list,
+        // drop it rather than clamp it to something that overflows. Nothing
+        // is lost: at that size the menu is already out of room, and the
+        // arrow keys still work.
+        if view_h < ROW_H
+            || view_top < 0.0
+            || list_x < 0.0
+            || list_x + w > win_w
+            || view_top + view_h > win_h
+        {
             self.fav_viewport = None;
             return;
         }

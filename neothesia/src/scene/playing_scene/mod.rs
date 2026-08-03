@@ -322,14 +322,51 @@ impl PlayingScene {
             .width(win_w)
             .build(&mut self.nuon);
 
-        nuon::label()
-            .text("Enter: play again    Backspace: menu")
-            .font_size(15.0)
-            .color(nuon::Color::new_u8(160, 160, 160, 1.0))
-            .y(top + 330.0)
-            .height(16.0)
-            .width(win_w)
-            .build(&mut self.nuon);
+        // Clickable, and the keyboard shortcuts they name still work.
+        let (btn_w, btn_h, btn_gap) = (220.0, 46.0, 18.0);
+        let btn_x = (win_w - (btn_w * 2.0 + btn_gap)) / 2.0;
+        let btn_y = top + 322.0;
+
+        if nuon::button()
+            .id("results-play-again")
+            .pos(btn_x, btn_y)
+            .size(btn_w, btn_h)
+            .color(nuon::Color::new_u8(160, 81, 238, 1.0))
+            .hover_color(nuon::Color::new_u8(184, 110, 255, 1.0))
+            .border_radius([8.0; 4])
+            .label("PLAY AGAIN")
+            .build(&mut self.nuon)
+        {
+            ctx.proxy
+                .send_event(NeothesiaEvent::Play(self.player.song().clone()))
+                .ok();
+        }
+
+        if nuon::button()
+            .id("results-menu")
+            .pos(btn_x + btn_w + btn_gap, btn_y)
+            .size(btn_w, btn_h)
+            .color(nuon::Color::new_u8(58, 58, 70, 1.0))
+            .hover_color(nuon::Color::new_u8(80, 80, 94, 1.0))
+            .border_radius([8.0; 4])
+            .label("MENU")
+            .build(&mut self.nuon)
+        {
+            ctx.proxy
+                .send_event(NeothesiaEvent::MainMenu(Some(self.player.song().clone())))
+                .ok();
+        }
+
+        // Keyboard equivalents, quiet and out of the way beneath each button.
+        for (x, key) in [(btn_x, "Enter"), (btn_x + btn_w + btn_gap, "Backspace")] {
+            nuon::label()
+                .text(key)
+                .font_size(12.0)
+                .color(nuon::Color::new_u8(130, 130, 130, 1.0))
+                .pos(x, btn_y + btn_h + 7.0)
+                .size(btn_w, 14.0)
+                .build(&mut self.nuon);
+        }
     }
 
     fn update_hud(&mut self, ctx: &Context) {
