@@ -144,6 +144,17 @@ impl super::MenuScene {
                         {
                             ctx.config.set_note_labels(!ctx.config.note_labels());
                         }
+
+                        spacer(ui);
+
+                        if nuon::settings_row_toggler()
+                            .title("Sheet Music")
+                            .subtitle("Scrolling staff notation across the top (M in game)")
+                            .value(ctx.config.sheet_music())
+                            .build(ui, rows)
+                        {
+                            ctx.config.set_sheet_music(!ctx.config.sheet_music());
+                        }
                     });
             });
     }

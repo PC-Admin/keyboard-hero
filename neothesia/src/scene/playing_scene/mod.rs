@@ -1,6 +1,6 @@
 use midi_file::midly::MidiMessage;
 use neothesia_core::render::{
-    GlowRenderer, GuidelineRenderer, NoteLabels, QuadRenderer, TextRenderer,
+    GlowRenderer, GuidelineRenderer, NoteLabels, QuadRenderer, SheetMusic, TextRenderer,
 };
 use std::time::Duration;
 use winit::{
@@ -45,6 +45,11 @@ pub struct PlayingScene {
     nuon_renderer: NuonRenderer,
 
     note_labels: Option<NoteLabels>,
+
+    /// Scrolling staff notation across the top. `None` only when the song has
+    /// nothing to engrave (a drum-only file, say).
+    sheet: Option<SheetMusic>,
+    show_sheet: bool,
 
     player: MidiPlayer,
     rewind_controller: RewindController,
@@ -106,6 +111,49 @@ impl PlayingScene {
             ctx.text_renderer_factory.new_renderer(),
         ));
 
+        // The staff shows the part the player is responsible for: the Human
+        // track if the song has one, otherwise everything visible. Reading
+        // along with the accompaniment as well would be unreadable.
+        let sheet = {
+            let human: Vec<usize> = song
+                .config
+                .tracks
+                .iter()
+                .filter(|t| t.player == crate::song::PlayerConfig::Human)
+                .map(|t| t.track_id)
+                .collect();
+
+            let wanted: &[usize] = if human.is_empty() {
+                &[]
+            } else {
+                &human
+            };
+
+            let notes: Vec<_> = song
+                .file
+                .tracks
+                .iter()
+                .filter(|t| {
+                    if wanted.is_empty() {
+                        !hidden_tracks.contains(&t.track_id)
+                    } else {
+                        wanted.contains(&t.track_id)
+                    }
+                })
+                .flat_map(|t| t.notes.iter().cloned())
+                .collect();
+
+            let sheet = SheetMusic::new(
+                &notes,
+                &song.file.measures,
+                song.file.time_signature.quarters_per_bar(),
+                ctx.text_renderer_factory.new_renderer(),
+                ctx.quad_renderer_factory.new_renderer(),
+            );
+            (!sheet.is_empty()).then_some(sheet)
+        };
+        let show_sheet = ctx.config.sheet_music();
+
         let player = MidiPlayer::new(
             ctx.output_manager.connection().clone(),
             song,
@@ -127,6 +175,8 @@ impl PlayingScene {
             keyboard,
             guidelines,
             note_labels,
+            sheet,
+            show_sheet,
             text_renderer,
             nuon_renderer: NuonRenderer::new(ctx),
 
@@ -376,7 +426,8 @@ impl PlayingScene {
         }
 
         // Slide the whole top-left block down as the top bar expands so the
-        // dropdown never covers it.
+        // dropdown never covers it. The sheet strip keeps to the middle of
+        // the screen, so it needs no room made for it here.
         let hud_top = self
             .top_bar
             .topbar_expand_animation
@@ -651,6 +702,24 @@ impl Scene for PlayingScene {
             );
         }
 
+        if self.show_sheet
+            && let Some(sheet) = self.sheet.as_mut()
+        {
+            // Ride down with the expanding top bar, as the HUD does, so the
+            // dropdown never sits on top of the staff.
+            let drop = self
+                .top_bar
+                .topbar_expand_animation
+                .animate_bool(0.0, 75.0, ctx.frame_timestamp);
+            sheet.update(
+                ctx.window_state.physical_size,
+                ctx.window_state.scale_factor as f32,
+                time,
+                ctx.window_state.logical_size,
+                drop,
+            );
+        }
+
         self.update_glow(delta);
 
         self.update_effects(delta, time);
@@ -742,6 +811,11 @@ impl Scene for PlayingScene {
             note_labels.render(rpass);
         }
         self.quad_renderer_fg.render(rpass);
+        if self.show_sheet
+            && let Some(sheet) = self.sheet.as_mut()
+        {
+            sheet.render(rpass);
+        }
         if let Some(glow) = &self.glow {
             glow.render(rpass);
         }
@@ -778,6 +852,16 @@ impl Scene for PlayingScene {
 
         if !self.finished && event.key_released(Key::Named(NamedKey::Space)) {
             self.player.pause_resume();
+        }
+
+        if let Some("m" | "M") = event.character_released() {
+            self.show_sheet = !self.show_sheet;
+            ctx.config.set_sheet_music(self.show_sheet);
+            self.toast_manager.toast(if self.show_sheet {
+                "Sheet Music: On"
+            } else {
+                "Sheet Music: Off"
+            });
         }
 
         handle_settings_input(ctx, &mut self.toast_manager, &mut self.waterfall, event);

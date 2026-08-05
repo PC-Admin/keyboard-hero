@@ -25,6 +25,12 @@ pub fn font_system() -> Rc<RefCell<FontSystem>> {
                     glyphon::fontdb::Source::Binary(Arc::new(include_bytes!(
                         "../../assets/fonts/bootstrap-icons.ttf"
                     ))),
+                    // Bravura, the reference font for SMuFL — the standard
+                    // music-notation glyph layout. Drives the sheet-music
+                    // bar; see `render::sheet`. SIL Open Font License 1.1.
+                    glyphon::fontdb::Source::Binary(Arc::new(include_bytes!(
+                        "../../assets/fonts/Bravura.otf"
+                    ))),
                 ])))
             })
             .clone()
