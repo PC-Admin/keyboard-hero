@@ -37,6 +37,11 @@ use toast_manager::ToastManager;
 mod animation;
 mod top_bar;
 
+/// Song-title marquee under the performer selector.
+const TITLE_FONT_SIZE: f32 = 14.0;
+/// Logical pixels per second the title crawls leftwards.
+const TITLE_SCROLL_SPEED: f32 = 45.0;
+
 pub struct PlayingScene {
     keyboard: Keyboard,
     waterfall: WaterfallRenderer,
@@ -64,6 +69,16 @@ pub struct PlayingScene {
     mouse_to_midi_state: MouseToMidiEventState,
 
     deduced_chord_name: String,
+
+    /// Song title under the performer selector, so what is playing is
+    /// readable without leaving the song. It sits still when it fits in the
+    /// selector's width and only crawls right to left when it does not.
+    /// Width is measured once up front; `title_scroll` is how far the crawl
+    /// has travelled from that same flush-left start, and switching performer
+    /// mode drops it back to 0 as a visible receipt that the click landed.
+    title: String,
+    title_width: f32,
+    title_scroll: f32,
 
     top_bar: TopBar,
 
@@ -154,6 +169,12 @@ impl PlayingScene {
         };
         let show_sheet = ctx.config.sheet_music();
 
+        // Measured with the same font the label will draw with, so the
+        // marquee knows exactly when the title has cleared the left edge.
+        let title = song_title(&song.file.name);
+        let title_buffer = TextRenderer::gen_buffer(TITLE_FONT_SIZE, &title);
+        let title_width = TextRenderer::measure(&title_buffer).0;
+
         let player = MidiPlayer::new(
             ctx.output_manager.connection().clone(),
             song,
@@ -193,6 +214,10 @@ impl PlayingScene {
             nuon: nuon::Ui::new(),
             mouse_to_midi_state: MouseToMidiEventState::default(),
             deduced_chord_name: String::new(),
+
+            title,
+            title_width,
+            title_scroll: 0.0,
 
             top_bar: TopBar::new(),
 
@@ -419,7 +444,7 @@ impl PlayingScene {
         }
     }
 
-    fn update_hud(&mut self, ctx: &Context) {
+    fn update_hud(&mut self, ctx: &Context, delta: Duration) {
         if self.finished {
             self.results_overlay_ui(ctx);
             return;
@@ -472,7 +497,84 @@ impl PlayingScene {
                     && !active
                 {
                     self.player.set_mode(seg_mode);
+                    // Snap the marquee back to its starting point: a switch
+                    // you can see even when the music does not change much.
+                    self.title_scroll = 0.0;
                 }
+            }
+
+            // --- song title, tucked under the selector --------------------
+            let band_y = hud_top + 46.0;
+            let band_h = TITLE_FONT_SIZE + 6.0;
+            let band_w = w * 3.0 + gap * 2.0;
+
+            let has_title = !self.title.is_empty() && self.title_width > 0.0;
+
+            // A scissor rect that leaves the window is a fatal wgpu
+            // validation error rather than a clipped draw, so on a window
+            // too small to hold the band, skip the title entirely.
+            let band_on_screen = x0 >= 0.0
+                && band_y >= 0.0
+                && x0 + band_w <= win_w
+                && band_y + band_h <= ctx.window_state.logical_size.height;
+
+            if has_title && self.title_width <= band_w {
+                // Short enough to read at a glance: sit still, left-aligned
+                // under the selector. No clipping needed — it fits.
+                self.title_scroll = 0.0;
+
+                nuon::label()
+                    .text(self.title.clone())
+                    .font_size(TITLE_FONT_SIZE)
+                    .color(nuon::Color::new_u8(190, 190, 190, 1.0))
+                    .text_justify(nuon::TextJustify::Left)
+                    .pos(x0, band_y)
+                    .size(band_w, band_h)
+                    .build(&mut self.nuon);
+            } else if has_title && band_on_screen {
+                // Too wide to show at once, so crawl it past instead. Travel
+                // is measured from the same flush-left spot a short title
+                // would sit in, so the first thing you read is the start of
+                // the name; only once it has cleared the left edge do later
+                // laps come back in from the right, the way a ticker does.
+                // Clamped, because the first frame's delta covers all of GPU
+                // and asset startup: unclamped it would skip the title
+                // straight past the flush-left position nobody had seen yet.
+                // Long stalls (a drag, an alt-tab) are held back the same way.
+                let dt = delta.as_secs_f32().min(1.0 / 30.0);
+                self.title_scroll += TITLE_SCROLL_SPEED * dt;
+
+                let first_pass = self.title_width;
+                let lap = band_w + self.title_width;
+                if self.title_scroll >= first_pass + lap {
+                    // Back onto the start of a lap, keeping the accumulator
+                    // bounded however long the song runs.
+                    self.title_scroll -= lap;
+                }
+
+                let clip = nuon::Rect::new(
+                    nuon::Point::new(x0, band_y),
+                    nuon::Size::new(band_w, band_h),
+                );
+
+                let text = self.title.clone();
+                let text_x = if self.title_scroll < first_pass {
+                    x0 - self.title_scroll
+                } else {
+                    x0 + band_w - (self.title_scroll - first_pass)
+                };
+                let text_w = self.title_width;
+
+                nuon::layer().scissor_rect(clip).build(&mut self.nuon, |ui| {
+                    nuon::label()
+                        .text(text)
+                        .font_size(TITLE_FONT_SIZE)
+                        .color(nuon::Color::new_u8(190, 190, 190, 1.0))
+                        .text_justify(nuon::TextJustify::Left)
+                        .pos(text_x, band_y)
+                        .size(text_w, band_h)
+                        .build(ui);
+                });
             }
         }
 
@@ -753,7 +855,7 @@ impl Scene for PlayingScene {
             ctx.config.animation_speed() / ctx.window_state.scale_factor as f32,
             self.keyboard.pos().y,
         );
-        self.update_hud(ctx);
+        self.update_hud(ctx, delta);
 
         TopBar::update(self, ctx);
 
@@ -954,4 +1056,19 @@ fn handle_settings_input(
 
         toast_manager.offset_toast(ctx.config.animation_offset());
     }
+}
+
+/// Turn a MIDI file name into something worth reading on the HUD: drop the
+/// extension, and let underscores stand in for the spaces they usually are.
+fn song_title(file_name: &str) -> String {
+    let stem = file_name
+        .rsplit_once('.')
+        .filter(|(stem, ext)| {
+            !stem.is_empty()
+                && (ext.eq_ignore_ascii_case("mid") || ext.eq_ignore_ascii_case("midi"))
+        })
+        .map(|(stem, _)| stem)
+        .unwrap_or(file_name);
+
+    stem.replace('_', " ").trim().to_string()
 }
