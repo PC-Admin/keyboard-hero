@@ -9,12 +9,13 @@
 //! note breaks the combo with a grey puff, and so does a note the song had to
 //! stall and wait for (wait-mode catch-ups earn "TOO SLOW", not streak).
 //!
-//! A chain of clean PERFECT chords ([`BOLT_CHORDS`] of them) calls **lightning**
-//! down: a bolt rakes in across the lane onto the key that earned it, and the
-//! strike leaves the board surging for [`SURGE_SECS`] — keyboard, falling bars
-//! and the score readout all lit electric, every note worth +50%. The chain
-//! does not build while the board is already surging: the lights have to go
-//! down before another one can be earned.
+//! Being genuinely on a roll calls **lightning** down: a chain of clean PERFECT
+//! chords ([`BOLT_CHORDS`] of them) *and* a crowd worked all the way up to the
+//! top sentiment level. A bolt rakes in across the lane onto the key that
+//! earned it, and the strike leaves the board surging for [`SURGE_SECS`] —
+//! keyboard, falling bars and the score readout all lit electric, every note
+//! worth +50%. The chain does not build while the board is already surging: the
+//! lights have to go down before another one can be earned.
 //!
 //! Everything draws as plain rounded quads through the existing foreground
 //! [`QuadRenderer`] (bloom faked with additive-ish translucent halos over the
@@ -31,6 +32,8 @@ const MAX_PARTICLES: usize = 6000;
 const FIRE_COMBO: u32 = 15;
 /// How many recent notes the "audience" judges you on.
 const SENTIMENT_WINDOW: usize = 20;
+/// Top sentiment level — the star-eyed grin, and nothing above it.
+const MAX_SENTIMENT: u8 = 5;
 /// Hit-timing grades (seconds between the file note and your press). Wide
 /// enough that a human sight-reading on a real keyboard can land PERFECTs:
 /// MIDI/audio latency alone eats tens of ms before your playing is judged at
@@ -49,9 +52,9 @@ const SLOW_WINDOW: f32 = 0.45;
 /// (~62ms), so a fast run still counts note by note; wide enough to absorb a
 /// chord the file itself voices slightly spread.
 const CHORD_WINDOW: std::time::Duration = std::time::Duration::from_millis(30);
-/// Consecutive chords struck entirely on PERFECT timing that call down the
-/// lightning. Chords, not keys, so a phrase nailed dead-on earns it whether
-/// those chords are single notes or fistfuls.
+/// Consecutive chords struck entirely on PERFECT timing needed for the
+/// lightning — alongside a maxed-out crowd. Chords, not keys, so a phrase
+/// nailed dead-on counts whether those chords are single notes or fistfuls.
 ///
 /// TEMPORARY: dialled down to 2 so the effect is easy to trigger by hand.
 /// Put it back to 5 for real play.
@@ -533,9 +536,15 @@ impl EffectsSystem {
         self.rising.iter()
     }
 
+    /// Is the crowd as won over as it gets — the top sentiment level? One of
+    /// the two things the lightning waits for.
+    pub fn crowd_maxed(&self) -> bool {
+        self.sentiment_level() == Some(MAX_SENTIMENT)
+    }
+
     /// Audience sentiment over the last [`SENTIMENT_WINDOW`] notes, as a level
-    /// 0..=5: 0 = angry, 2 = neutral, 4 = big smile, 5 = star-eyed grin.
-    /// `None` until a few notes have been judged.
+    /// `0..=MAX_SENTIMENT`: 0 = angry, 2 = neutral, 4 = big smile,
+    /// 5 = star-eyed grin. `None` until a few notes have been judged.
     pub fn sentiment_level(&self) -> Option<u8> {
         if self.recent.len() < 3 {
             return None;
@@ -544,7 +553,7 @@ impl EffectsSystem {
         let accuracy = self.accuracy()?;
 
         Some(if accuracy >= 0.88 && self.recent.len() >= 10 {
-            5
+            MAX_SENTIMENT
         } else if accuracy >= 0.75 {
             4
         } else if accuracy >= 0.60 {
@@ -640,7 +649,10 @@ impl EffectsSystem {
             if first_in_chord {
                 self.chord_all_perfect = perfect;
                 if perfect {
-                    self.perfect_chords += 1;
+                    // Capped, because the chain can sit full for a while
+                    // waiting on the crowd, and a HUD reading "7/5" would be
+                    // nonsense.
+                    self.perfect_chords = (self.perfect_chords + 1).min(BOLT_CHORDS);
                 } else {
                     self.perfect_chords = 0;
                 }
@@ -648,7 +660,12 @@ impl EffectsSystem {
                 self.break_perfect_streak();
             }
 
-            if self.perfect_chords >= BOLT_CHORDS {
+            // The lightning is for a player who is *really* on a roll, so a
+            // dead-on chain is only half of it: the crowd has to be all the way
+            // won over too. Played out of a scrappy patch, the chain fills and
+            // then waits — the strike lands on whichever note finally maxes the
+            // sentiment out.
+            if self.perfect_chords >= BOLT_CHORDS && self.crowd_maxed() {
                 // Struck, on the key that completed the chain — a chord
                 // finishing the chain is judged on that key alone, because the
                 // bolt has to land while the hit is still on screen and there
@@ -1690,6 +1707,30 @@ mod tests {
         }
     }
 
+    /// Work the crowd up to its top sentiment level without charging the
+    /// PERFECT chain or the combo tier: ten right notes a shade behind the
+    /// beat, then one wrong one to put the combo back to zero. Leaves the
+    /// rolling accuracy at 10/11, comfortably above the level-5 threshold.
+    ///
+    /// The lightning needs a maxed crowd, so tests that want a strike have to
+    /// earn one — and they cannot warm the crowd up with PERFECTs, which would
+    /// charge the chain and fire the bolt mid-warm-up.
+    fn warm_up_crowd(fx: &mut EffectsSystem, start: Instant) {
+        for i in 0..10u64 {
+            hit_off(fx, 60, start + Duration::from_millis(100 * i), 0.2);
+        }
+        fx.wrong_hit(0.0, 100.0);
+
+        assert_eq!(fx.sentiment_level(), Some(super::MAX_SENTIMENT));
+        assert_eq!(fx.combo(), 0);
+        assert_eq!(fx.perfect_chords(), 0);
+    }
+
+    /// Song time far enough past the warm-up that nothing chords with it.
+    fn after_warm_up(start: Instant) -> Instant {
+        start + Duration::from_secs(10)
+    }
+
     /// Three keys down for one chord is one musical event, so one combo step —
     /// however ragged the hands were about it.
     #[test]
@@ -1879,22 +1920,51 @@ mod tests {
         assert_eq!(fx.score(), 300);
     }
 
-    /// A full chain of chords nailed dead-on calls the lightning down — on the
-    /// chord that completes it, and not one chord sooner.
+    /// With the crowd already won over, a full chain of chords nailed dead-on
+    /// calls the lightning down — on the chord that completes it, and not one
+    /// chord sooner.
     #[test]
     fn a_chain_of_perfect_chords_calls_the_lightning() {
         let mut fx = EffectsSystem::new();
         let start = Instant::now();
+        warm_up_crowd(&mut fx, start);
 
+        let chain = after_warm_up(start);
         let short = BOLT_CHORDS as u64 - 1;
-        perfect_chords(&mut fx, start, short);
+        perfect_chords(&mut fx, chain, short);
         assert!(!fx.surging());
         assert_eq!(fx.perfect_chords(), BOLT_CHORDS - 1);
 
-        hit(&mut fx, 60, start + Duration::from_millis(100 * short));
+        hit(&mut fx, 60, chain + Duration::from_millis(100 * short));
         assert!(fx.surging());
-        // The chain starts over, so a long clean run keeps re-striking.
         assert_eq!(fx.perfect_chords(), 0);
+    }
+
+    /// The lightning is for a player on a roll, so a dead-on chain alone is not
+    /// enough: until the crowd is all the way won over the chain fills up and
+    /// waits, and the strike lands on whatever note finally maxes them out.
+    #[test]
+    fn a_cold_crowd_withholds_the_lightning() {
+        let mut fx = EffectsSystem::new();
+        let start = Instant::now();
+
+        // Straight in from the top of the song, playing dead on the beat. A few
+        // notes is not a roll, however clean, so the crowd is not maxed yet...
+        perfect_chords(&mut fx, start, BOLT_CHORDS as u64 + 2);
+        assert_ne!(fx.sentiment_level(), Some(super::MAX_SENTIMENT));
+        assert!(!fx.surging());
+        // ...and the chain sits full rather than running away with itself.
+        assert_eq!(fx.perfect_chords(), BOLT_CHORDS);
+
+        // Keep it clean until the crowd tops out — the sentiment level needs
+        // ten judged notes for that — and the bolt lands the moment it does.
+        perfect_chords(
+            &mut fx,
+            start + Duration::from_secs(5),
+            10 - (BOLT_CHORDS as u64 + 2),
+        );
+        assert_eq!(fx.sentiment_level(), Some(super::MAX_SENTIMENT));
+        assert!(fx.surging());
     }
 
     /// The surge cannot be extended by playing well through it: the chain is
@@ -1904,8 +1974,10 @@ mod tests {
     fn a_surge_cannot_be_renewed_before_it_ends() {
         let mut fx = EffectsSystem::new();
         let start = Instant::now();
+        warm_up_crowd(&mut fx, start);
 
-        perfect_chords(&mut fx, start, BOLT_CHORDS as u64);
+        let chain = after_warm_up(start);
+        perfect_chords(&mut fx, chain, BOLT_CHORDS as u64);
         assert!(fx.surging());
 
         // Two seconds in, play a whole clean chain. It banks nothing...
@@ -1913,7 +1985,7 @@ mod tests {
         fx.update(spent, 100.0, 0.0, 500.0);
         perfect_chords(
             &mut fx,
-            start + Duration::from_millis(100 * BOLT_CHORDS as u64),
+            chain + Duration::from_millis(100 * BOLT_CHORDS as u64),
             BOLT_CHORDS as u64,
         );
         assert_eq!(fx.perfect_chords(), 0);
@@ -1924,7 +1996,8 @@ mod tests {
         fx.update(super::SURGE_SECS - spent + 0.01, 100.0, 0.0, 500.0);
         assert!(!fx.surging());
 
-        let later = start + Duration::from_secs(30);
+        // The crowd never dropped, so a fresh chain is all it takes.
+        let later = chain + Duration::from_secs(30);
         perfect_chords(&mut fx, later, BOLT_CHORDS as u64 - 1);
         assert!(!fx.surging());
         hit(
@@ -1957,16 +2030,18 @@ mod tests {
     fn a_late_key_spoils_the_chord_it_belongs_to() {
         let mut fx = EffectsSystem::new();
         let start = Instant::now();
+        warm_up_crowd(&mut fx, start);
+        let chord = after_warm_up(start);
 
         // Two keys of one chord, the second of them behind the beat. The first
         // opened the chord's account; the second empties it again.
-        hit(&mut fx, 60, start);
+        hit(&mut fx, 60, chord);
         assert_eq!(fx.perfect_chords(), 1);
-        hit_off(&mut fx, 64, start, 0.2);
+        hit_off(&mut fx, 64, chord, 0.2);
         assert_eq!(fx.perfect_chords(), 0);
 
         // So a full chain is owed from scratch: one short of it is still dark.
-        let next = start + Duration::from_millis(100);
+        let next = chord + Duration::from_millis(100);
         perfect_chords(&mut fx, next, BOLT_CHORDS as u64 - 1);
         assert!(!fx.surging());
 
@@ -2002,16 +2077,23 @@ mod tests {
     fn the_surge_pays_half_again_per_note() {
         let mut fx = EffectsSystem::new();
         let start = Instant::now();
+        warm_up_crowd(&mut fx, start);
 
-        // One chord short of the chain, so the combo tier is still x1 and each
-        // note is worth its face value of 100.
-        let mut at = BOLT_CHORDS as u64 - 1;
-        perfect_chords(&mut fx, start, at);
-        assert_eq!(fx.score(), at * 100);
+        // Every note here is worth its face value of 100: the combo starts over
+        // after the warm-up, so the chain never runs long enough to reach the
+        // x2 tier and only the surge changes what a note pays.
+        let chain = after_warm_up(start);
+        let mut at = 0;
         let mut next = || {
             at += 1;
-            start + Duration::from_millis(100 * at)
+            chain + Duration::from_millis(100 * at)
         };
+
+        // One chord short of the chain.
+        for _ in 0..BOLT_CHORDS - 1 {
+            assert_eq!(pay_for_perfect(&mut fx, next()), 100);
+        }
+        assert!(!fx.surging());
 
         // The chord that summons the bolt is itself paid at the surge rate.
         assert_eq!(pay_for_perfect(&mut fx, next()), 150);

@@ -694,17 +694,26 @@ impl PlayingScene {
                     self.effects
                         .render_bolt_charge(&mut self.quad_renderer_fg, 16.0, row_y + 6.0);
 
-                nuon::label()
-                    .text(format!(
+                // A full chain still waits on a maxed-out crowd, so say so —
+                // full pips and no bolt would otherwise look broken.
+                let chain_full = self.effects.perfect_chords() >= effects::BOLT_CHORDS;
+                let text = if chain_full && !self.effects.crowd_maxed() {
+                    "CHAIN READY · WIN THE CROWD".to_string()
+                } else {
+                    format!(
                         "PERFECT CHAIN {}/{}",
                         self.effects.perfect_chords(),
                         effects::BOLT_CHORDS
-                    ))
+                    )
+                };
+
+                nuon::label()
+                    .text(text)
                     .font_size(12.0)
                     .color(nuon::Color::new_u8(150, 200, 230, 1.0))
                     .text_justify(nuon::TextJustify::Left)
                     .pos(16.0 + pips_w + 8.0, row_y)
-                    .size(220.0, 12.0)
+                    .size(240.0, 12.0)
                     .build(&mut self.nuon);
             }
 
