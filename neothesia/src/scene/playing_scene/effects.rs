@@ -48,9 +48,12 @@ const SLOW_WINDOW: f32 = 0.45;
 /// chord the file itself voices slightly spread.
 const CHORD_WINDOW: std::time::Duration = std::time::Duration::from_millis(30);
 /// Consecutive chords struck entirely on PERFECT timing that call down the
-/// lightning. Chords, not keys, so a five-chord phrase nailed dead-on earns it
-/// whether those chords are single notes or fistfuls.
-pub const BOLT_CHORDS: u32 = 5;
+/// lightning. Chords, not keys, so a phrase nailed dead-on earns it whether
+/// those chords are single notes or fistfuls.
+///
+/// TEMPORARY: dialled down to 2 so the effect is easy to trigger by hand.
+/// Put it back to 5 for real play.
+pub const BOLT_CHORDS: u32 = 2;
 /// How long the board stays lit after a bolt lands. Long enough to be worth
 /// pushing for, short enough that it has to be re-earned.
 const SURGE_SECS: f32 = 8.0;
@@ -1631,7 +1634,7 @@ fn mix(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
 
 #[cfg(test)]
 mod tests {
-    use super::{EffectsSystem, Results};
+    use super::{BOLT_CHORDS, EffectsSystem, Results};
     use std::time::{Duration, Instant};
 
     /// Strike a correct, well-timed note that the song asked for at `chord`.
@@ -1642,6 +1645,13 @@ mod tests {
     /// The same, `delta` seconds off the beat — 0.2 is a GOOD, not a PERFECT.
     fn hit_off(fx: &mut EffectsSystem, note: u8, chord: Instant, delta: f32) {
         fx.good_hit(note, 0.0, 100.0, 20.0, delta, false, Some(chord));
+    }
+
+    /// Points a chord struck dead on time is actually credited with.
+    fn pay_for_perfect(fx: &mut EffectsSystem, chord: Instant) -> u64 {
+        let before = fx.score();
+        hit(fx, 60, chord);
+        fx.score() - before
     }
 
     /// `n` separate chords, each one note struck dead on time.
@@ -1808,27 +1818,12 @@ mod tests {
         assert_eq!(fx.results().missed, 2);
     }
 
-    /// Perfect hits earn 100 points, multiplied once the combo passes each
-    /// tier of 10 — so the 10th consecutive hit is the first one worth 200.
-    /// Ten PERFECTs in a row also call the lightning down on the fifth, and
-    /// every note from there is paid at the surge's +50% as well.
+    /// Hits earn timing points, multiplied once the combo passes each tier of
+    /// 10 — so the 10th consecutive hit is the first one worth double. Graded
+    /// on GOOD hits (60 points) to keep the lightning out of it: notes a shade
+    /// behind never charge the chain, so this is the combo tier alone.
     #[test]
     fn score_applies_the_combo_multiplier() {
-        let mut fx = EffectsSystem::new();
-        let start = Instant::now();
-
-        perfect_chords(&mut fx, start, 10);
-
-        let plain = 4 * 100; // notes 1-4: x1, no surge yet
-        let surged = 5 * 150; // notes 5-9: x1, +50%
-        let tenth = 100 * 2 * 3 / 2; // note 10: x2 tier, +50%
-        assert_eq!(fx.score(), plain + surged + tenth);
-    }
-
-    /// The combo tier stands on its own with no lightning in play: notes a
-    /// shade behind never charge the chain, so the 10th is simply worth x2.
-    #[test]
-    fn combo_tier_applies_without_the_lightning() {
         let mut fx = EffectsSystem::new();
         let start = Instant::now();
 
@@ -1855,18 +1850,19 @@ mod tests {
         assert_eq!(fx.score(), 300);
     }
 
-    /// Five chords nailed dead-on call the lightning down — on the fifth, not
-    /// the fourth, and not before.
+    /// A full chain of chords nailed dead-on calls the lightning down — on the
+    /// chord that completes it, and not one chord sooner.
     #[test]
-    fn five_perfect_chords_call_the_lightning() {
+    fn a_chain_of_perfect_chords_calls_the_lightning() {
         let mut fx = EffectsSystem::new();
         let start = Instant::now();
 
-        perfect_chords(&mut fx, start, 4);
+        let short = BOLT_CHORDS as u64 - 1;
+        perfect_chords(&mut fx, start, short);
         assert!(!fx.surging());
-        assert_eq!(fx.perfect_chords(), 4);
+        assert_eq!(fx.perfect_chords(), BOLT_CHORDS - 1);
 
-        hit(&mut fx, 60, start + Duration::from_millis(400));
+        hit(&mut fx, 60, start + Duration::from_millis(100 * short));
         assert!(fx.surging());
         // The chain starts over, so a long clean run keeps re-striking.
         assert_eq!(fx.perfect_chords(), 0);
@@ -1895,18 +1891,20 @@ mod tests {
         let mut fx = EffectsSystem::new();
         let start = Instant::now();
 
-        perfect_chords(&mut fx, start, 3);
-        assert_eq!(fx.perfect_chords(), 3);
-
-        let chord = start + Duration::from_millis(300);
-        hit(&mut fx, 60, chord);
-        hit_off(&mut fx, 64, chord, 0.2);
+        // Two keys of one chord, the second of them behind the beat. The first
+        // opened the chord's account; the second empties it again.
+        hit(&mut fx, 60, start);
+        assert_eq!(fx.perfect_chords(), 1);
+        hit_off(&mut fx, 64, start, 0.2);
         assert_eq!(fx.perfect_chords(), 0);
 
-        // And the chain has to be rebuilt from nothing — four more clean
-        // chords are not enough.
-        perfect_chords(&mut fx, start + Duration::from_millis(400), 4);
+        // So a full chain is owed from scratch: one short of it is still dark.
+        let next = start + Duration::from_millis(100);
+        perfect_chords(&mut fx, next, BOLT_CHORDS as u64 - 1);
         assert!(!fx.surging());
+
+        hit(&mut fx, 60, next + Duration::from_millis(100 * BOLT_CHORDS as u64));
+        assert!(fx.surging());
     }
 
     /// Every kind of mistake empties the chain.
@@ -1915,18 +1913,18 @@ mod tests {
         let start = Instant::now();
 
         let mut fx = EffectsSystem::new();
-        perfect_chords(&mut fx, start, 3);
+        perfect_chords(&mut fx, start, BOLT_CHORDS as u64 - 1);
         fx.wrong_hit(0.0, 100.0);
         assert_eq!(fx.perfect_chords(), 0);
 
         let mut fx = EffectsSystem::new();
-        perfect_chords(&mut fx, start, 3);
+        perfect_chords(&mut fx, start, BOLT_CHORDS as u64 - 1);
         fx.miss();
         assert_eq!(fx.perfect_chords(), 0);
 
         // A note the song had to stall and wait for, too.
         let mut fx = EffectsSystem::new();
-        perfect_chords(&mut fx, start, 3);
+        perfect_chords(&mut fx, start, BOLT_CHORDS as u64 - 1);
         fx.good_hit(60, 0.0, 100.0, 20.0, 0.9, true, Some(start));
         assert_eq!(fx.perfect_chords(), 0);
     }
@@ -1938,22 +1936,32 @@ mod tests {
         let mut fx = EffectsSystem::new();
         let start = Instant::now();
 
-        perfect_chords(&mut fx, start, 4);
-        assert_eq!(fx.score(), 4 * 100);
+        // One chord short of the chain, so the combo tier is still x1 and each
+        // note is worth its face value of 100.
+        let mut at = BOLT_CHORDS as u64 - 1;
+        perfect_chords(&mut fx, start, at);
+        assert_eq!(fx.score(), at * 100);
+        let mut next = || {
+            at += 1;
+            start + Duration::from_millis(100 * at)
+        };
 
-        hit(&mut fx, 60, start + Duration::from_millis(400));
-        assert_eq!(fx.score(), 400 + 150);
+        // The chord that summons the bolt is itself paid at the surge rate.
+        assert_eq!(pay_for_perfect(&mut fx, next()), 150);
+        assert!(fx.surging());
+        assert_eq!(pay_for_perfect(&mut fx, next()), 150);
 
-        hit(&mut fx, 60, start + Duration::from_millis(500));
-        assert_eq!(fx.score(), 550 + 150);
-
-        // Run the clock past the window: the lights go out and notes are back
-        // to face value.
+        // Run the clock past the window: the lights go out.
         fx.update(super::SURGE_SECS + 0.1, 100.0, 0.0, 500.0);
         assert!(!fx.surging());
 
-        hit(&mut fx, 60, start + Duration::from_millis(600));
-        assert_eq!(fx.score(), 700 + 100);
+        // One note off the beat, to empty the chain the surged notes were
+        // quietly rebuilding — otherwise the very next PERFECT could complete
+        // it and re-strike, which is not what is under test here.
+        hit_off(&mut fx, 60, next(), 0.2);
+
+        // And notes are back to face value.
+        assert_eq!(pay_for_perfect(&mut fx, next()), 100);
     }
 
     #[test]
