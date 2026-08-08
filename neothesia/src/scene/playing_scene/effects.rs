@@ -9,10 +9,12 @@
 //! note breaks the combo with a grey puff, and so does a note the song had to
 //! stall and wait for (wait-mode catch-ups earn "TOO SLOW", not streak).
 //!
-//! Five clean PERFECT chords in a row call **lightning** down: a bolt cracks
-//! from the top of the lane onto the key that earned it, and the strike leaves
-//! the board surging for [`SURGE_SECS`] — keyboard, falling bars and the score
-//! readout all lit electric, every note worth +50%.
+//! A chain of clean PERFECT chords ([`BOLT_CHORDS`] of them) calls **lightning**
+//! down: a bolt rakes in across the lane onto the key that earned it, and the
+//! strike leaves the board surging for [`SURGE_SECS`] — keyboard, falling bars
+//! and the score readout all lit electric, every note worth +50%. The chain
+//! does not build while the board is already surging: the lights have to go
+//! down before another one can be earned.
 //!
 //! Everything draws as plain rounded quads through the existing foreground
 //! [`QuadRenderer`] (bloom faked with additive-ish translucent halos over the
@@ -204,7 +206,8 @@ pub struct EffectsSystem {
     last_chord: Option<Instant>,
 
     /// Consecutive chords struck entirely on PERFECT timing. Reaching
-    /// [`BOLT_CHORDS`] calls the lightning down and starts the count over.
+    /// [`BOLT_CHORDS`] calls the lightning down and empties the count; it stays
+    /// empty for as long as the resulting surge lasts.
     perfect_chords: u32,
     /// Is the chord being played right now still all-PERFECT? One late key
     /// spoils it, and the streak with it.
@@ -630,34 +633,36 @@ impl EffectsSystem {
             PTS_SLOW
         };
 
-        // --- PERFECT chord streak -> lightning -------------------------------
-        // A chord counts once, and only if *every* key in it landed PERFECT:
-        // the first key opens the chord's account, a later sloppy one spoils
-        // both the chord and the streak it was building.
-        if first_in_chord {
-            self.chord_all_perfect = perfect;
-            if perfect {
-                self.perfect_chords += 1;
-            } else {
-                self.perfect_chords = 0;
+        // --- PERFECT chord chain -> lightning --------------------------------
+        // Nothing charges while the board is already surging: the reward has to
+        // run out, and then be earned again from nothing. Counting through the
+        // surge would have a chain banked the moment it expired and re-strike
+        // instantly, so the lights would never actually go down.
+        if !self.surging() {
+            // A chord counts once, and only if *every* key in it landed
+            // PERFECT: the first key opens the chord's account, a later sloppy
+            // one spoils both the chord and the chain it was building.
+            if first_in_chord {
+                self.chord_all_perfect = perfect;
+                if perfect {
+                    self.perfect_chords += 1;
+                } else {
+                    self.perfect_chords = 0;
+                }
+            } else if !perfect && self.chord_all_perfect {
+                self.break_perfect_streak();
             }
-        } else if !perfect && self.chord_all_perfect {
-            self.break_perfect_streak();
-        }
 
-        if self.perfect_chords >= BOLT_CHORDS {
-            // Struck, on the key that completed the chain — a chord finishing
-            // the chain is judged on that key alone, because the bolt has to
-            // land while the hit is still on screen and there is no later
-            // moment at which a chord is known to be over.
-            //
-            // The count starts over, so a long PERFECT run can call the
-            // lightning down again and again, each strike refreshing the surge
-            // from full.
-            self.perfect_chords = 0;
-            self.surge = SURGE_SECS;
-            self.strike_flash = 1.0;
-            self.spawn_bolt(cx, y, key_w);
+            if self.perfect_chords >= BOLT_CHORDS {
+                // Struck, on the key that completed the chain — a chord
+                // finishing the chain is judged on that key alone, because the
+                // bolt has to land while the hit is still on screen and there
+                // is no later moment at which a chord is known to be over.
+                self.perfect_chords = 0;
+                self.surge = SURGE_SECS;
+                self.strike_flash = 1.0;
+                self.spawn_bolt(cx, y, key_w);
+            }
         }
 
         // Scored after the strike, so the note that summoned the bolt is the
@@ -1400,57 +1405,63 @@ impl EffectsSystem {
         let pulse = self.surge_pulse();
         let [r, g, b] = ARC_TINT;
 
-        // The keyboard, lit from the hit line down. Stacked bands rather than
-        // one flat film: light spilling onto the keys, brightest where it
-        // enters and falling away down the keybed, so the keys underneath stay
-        // legible instead of disappearing under a tint.
+        let breathe = 0.8 + 0.2 * pulse;
+
+        // Light spilling off the hit line, down over the keys and up into the
+        // lane. A smooth ramp rather than a few broad bands: the keys stay
+        // legible under it, and there is no step in the falloff to see.
         let kb_h = win_h - hit_line_y;
         if kb_h > 0.0 {
-            const BANDS: usize = 7;
-            let band_h = kb_h / BANDS as f32;
-            for i in 0..BANDS {
-                let fall = 1.0 - i as f32 / BANDS as f32;
-                let a = (0.05 + 0.22 * fall * fall) * (0.75 + 0.25 * pulse) * k;
-                quads.push(QuadInstance {
-                    position: [board_left, hit_line_y + i as f32 * band_h],
-                    size: [board_width, band_h + 1.0],
-                    color: [r, g, b, a],
-                    border_radius: [0.0; 4],
-                });
-            }
+            vgradient(
+                quads,
+                board_left,
+                board_width,
+                hit_line_y,
+                kb_h.min(300.0),
+                0.17 * breathe * k,
+                [r, g, b],
+            );
         }
+        vgradient(
+            quads,
+            board_left,
+            board_width,
+            hit_line_y,
+            -90.0,
+            0.095 * breathe * k,
+            [r, g, b],
+        );
 
-        // Spill up into the lane above the keys, fading out with height.
-        const SPILL: usize = 5;
-        const SPILL_H: f32 = 14.0;
-        for i in 0..SPILL {
-            let fall = 1.0 - i as f32 / SPILL as f32;
-            let a = (0.03 + 0.13 * fall * fall) * (0.75 + 0.25 * pulse) * k;
-            quads.push(QuadInstance {
-                position: [board_left, hit_line_y - (i + 1) as f32 * SPILL_H],
-                size: [board_width, SPILL_H + 1.0],
-                color: [r, g, b, a],
-                border_radius: [0.0; 4],
-            });
-        }
-
-        // A hot filament right along the hit line, under a soft blue bloom.
+        // The hit line itself: a thin filament with its own tight bloom, so the
+        // line reads as the live edge the light is coming off.
+        vgradient(
+            quads,
+            board_left,
+            board_width,
+            hit_line_y,
+            18.0,
+            0.10 * breathe * k,
+            ARC_SPARK,
+        );
+        vgradient(
+            quads,
+            board_left,
+            board_width,
+            hit_line_y,
+            -18.0,
+            0.10 * breathe * k,
+            ARC_SPARK,
+        );
         quads.push(QuadInstance {
-            position: [board_left, hit_line_y - 8.0],
-            size: [board_width, 16.0],
-            color: [ARC_SPARK[0], ARC_SPARK[1], ARC_SPARK[2], (0.16 + 0.12 * pulse) * k],
-            border_radius: [8.0; 4],
-        });
-        quads.push(QuadInstance {
-            position: [board_left, hit_line_y - 2.5],
-            size: [board_width, 5.0],
+            position: [board_left, hit_line_y - 1.5],
+            size: [board_width, 3.0],
             color: [
                 ARC_HOT[0],
                 ARC_HOT[1],
                 ARC_HOT[2],
-                (0.55 + 0.30 * pulse) * k,
+                (0.32 + 0.22 * pulse) * k,
             ],
-            border_radius: [2.5; 4],
+            border_radius: [1.5; 4],
         });
     }
 
@@ -1595,6 +1606,51 @@ fn dot(quads: &mut QuadRenderer, x: f32, y: f32, d: f32, color: [f32; 3], a: f32
         color: [color[0], color[1], color[2], a],
         border_radius: [half, half, half, half],
     });
+}
+
+/// Lay a soft vertical glow of `color` across `w` pixels, `peak` alpha at
+/// `edge` fading to nothing `depth` pixels away (a negative depth reaches
+/// upwards instead).
+///
+/// The quad renderer has no gradient fill, so the ramp is built from layers —
+/// but *nested* ones, all sharing the top edge at `edge` and each reaching a
+/// different distance out from it. Their alphas stack into the ramp, and since
+/// no two layers share an interior edge there is nothing to double-blend into a
+/// visible line. (Tiling the ramp as a column of abutting slices is what draws
+/// those lines: every seam is a sliver covered twice.)
+fn vgradient(
+    quads: &mut QuadRenderer,
+    x: f32,
+    w: f32,
+    edge: f32,
+    depth: f32,
+    peak: f32,
+    color: [f32; 3],
+) {
+    const LAYERS: usize = 32;
+
+    // Alpha per layer, such that all of them together come to `peak` where they
+    // all overlap. Tiny — which is exactly why the step at the far end of each
+    // layer is invisible.
+    let per = 1.0 - (1.0 - peak).powf(1.0 / LAYERS as f32);
+
+    for i in 1..=LAYERS {
+        // How far this layer reaches, as a fraction of `depth`. Chosen so that
+        // the number of layers still covering a given distance falls off
+        // quadratically — a soft glow that leaves the edge strong and thins out
+        // to nothing, rather than a straight linear fade.
+        let reach = depth * (1.0 - (1.0 - i as f32 / LAYERS as f32).sqrt());
+        if reach.abs() < 0.5 {
+            continue;
+        }
+
+        quads.push(QuadInstance {
+            position: [x, edge.min(edge + reach)],
+            size: [w, reach.abs()],
+            color: [color[0], color[1], color[2], per],
+            border_radius: [0.0; 4],
+        });
+    }
 }
 
 /// Lay a chain of overlapping dots of diameter `d` from `a` to `b`. The quad
@@ -1866,6 +1922,44 @@ mod tests {
         assert!(fx.surging());
         // The chain starts over, so a long clean run keeps re-striking.
         assert_eq!(fx.perfect_chords(), 0);
+    }
+
+    /// The surge cannot be extended by playing well through it: the chain is
+    /// frozen while the lights are up, so the reward has to run out and then be
+    /// earned again from nothing.
+    #[test]
+    fn a_surge_cannot_be_renewed_before_it_ends() {
+        let mut fx = EffectsSystem::new();
+        let start = Instant::now();
+
+        perfect_chords(&mut fx, start, BOLT_CHORDS as u64);
+        assert!(fx.surging());
+        let struck_at = fx.surge_secs_left();
+
+        // A whole clean chain played inside the surge banks nothing and, above
+        // all, does not top the timer back up.
+        fx.update(2.0, 100.0, 0.0, 500.0);
+        perfect_chords(
+            &mut fx,
+            start + Duration::from_millis(100 * BOLT_CHORDS as u64),
+            BOLT_CHORDS as u64,
+        );
+        assert_eq!(fx.perfect_chords(), 0);
+        assert!(fx.surge_secs_left() < struck_at);
+
+        // Once it expires, the same playing earns a fresh strike.
+        fx.update(super::SURGE_SECS, 100.0, 0.0, 500.0);
+        assert!(!fx.surging());
+
+        let later = start + Duration::from_secs(30);
+        perfect_chords(&mut fx, later, BOLT_CHORDS as u64 - 1);
+        assert!(!fx.surging());
+        hit(
+            &mut fx,
+            60,
+            later + Duration::from_millis(100 * BOLT_CHORDS as u64),
+        );
+        assert!(fx.surging());
     }
 
     /// The chain is about *timing*, not correctness: right notes played a
