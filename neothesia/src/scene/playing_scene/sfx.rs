@@ -21,7 +21,9 @@ static FAIL_SOUND: &[u8] = include_bytes!("../../../../assets/fail.ogg");
 static LIGHTNING_SOUND: &[u8] = include_bytes!("../../../../assets/lightning.mp3");
 
 const FAIL_VOLUME: f32 = 0.7;
-const LIGHTNING_VOLUME: f32 = 0.85;
+/// Well under the others: the clip is a close, dry thunder crack, and at
+/// anything like their level it lands as an explosion over the music.
+const LIGHTNING_VOLUME: f32 = 0.3;
 const CROWD_VOLUME: f32 = 0.9;
 const BANDS: [char; 5] = ['A', 'B', 'C', 'D', 'F'];
 
