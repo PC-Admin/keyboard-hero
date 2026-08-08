@@ -97,37 +97,28 @@ impl MidiPlayer {
                         .midi_event(u4::new(channel), event.message);
 
                     // AUTO claims no parts at all, so there would be nothing to
-                    // grade — instead the song's own playable notes become
-                    // targets and whatever the player adds over the top is
-                    // graded for real. Channel 9 is percussion (drum hits, not
-                    // keys) and notes off the keyboard cannot be played, so
-                    // neither becomes a target.
-                    if self.mode != PerformMode::Auto || event.channel == 9 {
-                        return;
-                    }
-
-                    let note_key = match event.message {
-                        MidiMessage::NoteOn { key, .. } | MidiMessage::NoteOff { key, .. } => {
-                            Some(key.as_int())
-                        }
-                        _ => None,
-                    };
-
-                    if note_key.is_some_and(|k| self.play_along.covers(k)) {
+                    // grade — instead the song's own notes become targets and
+                    // whatever the player adds over the top is graded for real.
+                    if self.mode == PerformMode::Auto
+                        && is_players_note(event.channel, &event.message, &self.play_along)
+                    {
                         self.play_along
                             .midi_event(MidiEventSource::File, &event.message);
                     }
                 }
-                // The player's part. Its notes are theirs to play, so they are
-                // targets rather than something the synth sounds — which is
-                // both what HUMAN waits on and what HERO leaves silent. Other
-                // events (controllers and the like) still go out, so the track
-                // sounds as intended when they do play it.
+                // The player's part. Notes they can actually reach are theirs to
+                // play, so those become targets rather than something the synth
+                // sounds — which is both what HUMAN waits on and what HERO
+                // leaves silent. Everything else on the track still goes out:
+                // controllers, so it sounds as intended when they do play it,
+                // and any note beyond their reach, which would otherwise vanish
+                // from the song — and, worse, leave wait mode stalled forever on
+                // a key nobody can press.
                 PlayerConfig::Human => {
-                    self.play_along
-                        .midi_event(MidiEventSource::File, &event.message);
-
-                    if should_forward_human_event(&event.message) {
+                    if is_players_note(event.channel, &event.message, &self.play_along) {
+                        self.play_along
+                            .midi_event(MidiEventSource::File, &event.message);
+                    } else {
                         self.output.midi_event(u4::new(channel), event.message);
                     }
                 }
@@ -311,11 +302,17 @@ pub enum MidiEventSource {
 /// slightly is playing, not flailing.
 const MATCH_LEEWAY: Duration = Duration::from_millis(700);
 
-fn should_forward_human_event(message: &MidiMessage) -> bool {
-    !matches!(
-        message,
-        MidiMessage::NoteOn { .. } | MidiMessage::NoteOff { .. }
-    )
+/// Is this event a note on the player's own part that they could actually
+/// strike? Drum hits are not keys, and a note off the end of their keyboard
+/// cannot be reached however willing they are — neither is theirs to play, so
+/// neither may be taken off the synth or set as a target.
+fn is_players_note(channel: u8, message: &MidiMessage, play_along: &PlayAlong) -> bool {
+    let key = match message {
+        MidiMessage::NoteOn { key, .. } | MidiMessage::NoteOff { key, .. } => key.as_int(),
+        _ => return false,
+    };
+
+    channel != 9 && play_along.covers(key)
 }
 
 type NoteId = u8;
@@ -573,6 +570,30 @@ mod tests {
             key: key.into(),
             vel: 90.into(),
         }
+    }
+
+    /// Only notes the player could actually strike are theirs. Losing this is
+    /// what once made a claimed track drop every note beyond the end of the
+    /// keyboard — silent in the song, and set as a target nobody could hit.
+    #[test]
+    fn a_note_out_of_reach_is_not_the_players() {
+        // A 61-key board: middle C is on it, the bottom of an 88 is not.
+        let pa = PlayAlong::new(piano_layout::KeyboardRange::new(36..=96));
+
+        assert!(is_players_note(0, &note_on(60), &pa));
+
+        assert!(
+            !is_players_note(0, &note_on(21), &pa),
+            "below the keyboard: the synth must still sound it"
+        );
+        assert!(
+            !is_players_note(9, &note_on(60), &pa),
+            "channel 9 is a drum hit, not a key"
+        );
+        assert!(
+            !is_players_note(0, &MidiMessage::ProgramChange { program: 1.into() }, &pa),
+            "not a note at all"
+        );
     }
 
     /// Jam mode: a target the user matches while it is still live is a Good
