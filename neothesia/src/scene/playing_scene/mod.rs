@@ -326,6 +326,11 @@ impl PlayingScene {
             }
         }
 
+        // Thunder for a bolt that landed while those hits were judged.
+        if self.effects.take_strike() {
+            self.sfx.lightning();
+        }
+
         self.effects.update(dt, hit_line_y, pos.x, board_width);
     }
 
@@ -514,53 +519,30 @@ impl PlayingScene {
         // itself, jam over the top), HUMAN (song waits). Tallies keep
         // running across switches.
         {
-            use midi_player::PerformMode;
-
             let win_w = ctx.window_state.logical_size.width;
-            let mode = self.player.mode();
 
-            let (w, h, gap) = (64.0, 32.0, 2.0);
-            let x0 = win_w - (w * 3.0 + gap * 2.0) - 16.0;
-
-            let segments = [
-                (PerformMode::Hero, "HERO", [8.0, 0.0, 0.0, 8.0]),
-                (PerformMode::Auto, "AUTO", [0.0; 4]),
-                (PerformMode::Human, "HUMAN", [0.0, 8.0, 8.0, 0.0]),
-            ];
-
-            for (i, (seg_mode, label, radius)) in segments.into_iter().enumerate() {
-                let active = mode == seg_mode;
-                let color = if active {
-                    nuon::Color::new_u8(160, 81, 238, 1.0)
-                } else {
-                    nuon::Color::new_u8(50, 50, 60, 0.9)
-                };
-
-                if nuon::button()
-                    .id(label)
-                    .pos(x0 + i as f32 * (w + gap), hud_top + 10.0)
-                    .size(w, h)
-                    .color(color)
-                    .border_radius(radius)
-                    .label(label)
-                    .build(&mut self.nuon)
-                    && !active
-                {
-                    self.player.set_mode(seg_mode);
-                    // Remembered for the session, so leaving the song — to
-                    // replay it or to pick another — comes back to the mode
-                    // the player asked for rather than the song's default.
-                    ctx.perform_mode = seg_mode;
-                    // Snap the marquee back to its starting point: a switch
-                    // you can see even when the music does not change much.
-                    self.title_scroll = 0.0;
-                }
+            if let Some(mode) = super::performer_selector(
+                &mut self.nuon,
+                win_w,
+                hud_top + 10.0,
+                self.player.mode(),
+            ) {
+                self.player.set_mode(mode);
+                // Remembered for the session, so leaving the song — to replay
+                // it or to pick another — comes back to the mode the player
+                // asked for rather than the song's default.
+                ctx.perform_mode = mode;
+                // Snap the marquee back to its starting point: a switch you
+                // can see even when the music does not change much.
+                self.title_scroll = 0.0;
             }
 
             // --- song title, tucked under the selector --------------------
+            // Measured off the selector, so the two stay aligned.
+            let x0 = super::performer_selector_x(win_w);
             let band_y = hud_top + 46.0;
             let band_h = TITLE_FONT_SIZE + 6.0;
-            let band_w = w * 3.0 + gap * 2.0;
+            let band_w = super::PERFORMER_SELECTOR_W;
 
             let has_title = !self.title.is_empty() && self.title_width > 0.0;
 

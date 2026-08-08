@@ -1,11 +1,12 @@
-//! Sound effects for play-along mode: the fail buzzer and the results-screen
-//! crowd.
+//! Sound effects for play-along mode: the fail buzzer, the lightning crack,
+//! and the results-screen crowd.
 //!
 //! Everything plays on its own audio stream, separate from the MIDI synth —
 //! so it sounds the same no matter which MIDI output is selected, external
 //! keyboards included.
 //!
-//! The fail sound is an embedded Ogg clip (assets/fail.ogg). The crowd
+//! The fail and lightning sounds are embedded clips (assets/), so they are
+//! there for everyone and need no disk read at the moment they fire. The crowd
 //! reactions live in `~/Music/FX` and are matched to grade bands by filename
 //! suffix: a file ending `_A` (before the extension) plays for any A-grade
 //! result, `_B` for B grades, and so on through `_C`, `_D` and `_F`. Several
@@ -16,8 +17,11 @@
 use std::{collections::HashMap, io::Cursor, path::PathBuf};
 
 static FAIL_SOUND: &[u8] = include_bytes!("../../../../assets/fail.ogg");
+/// Dragon Studio "lightning strike" (freesound id 386161), a one-second crack.
+static LIGHTNING_SOUND: &[u8] = include_bytes!("../../../../assets/lightning.mp3");
 
 const FAIL_VOLUME: f32 = 0.7;
+const LIGHTNING_VOLUME: f32 = 0.85;
 const CROWD_VOLUME: f32 = 0.9;
 const BANDS: [char; 5] = ['A', 'B', 'C', 'D', 'F'];
 
@@ -55,6 +59,7 @@ pub struct Sfx {
     /// stream).
     stream: Option<rodio::MixerDeviceSink>,
     fail_playing: Option<rodio::Player>,
+    lightning_playing: Option<rodio::Player>,
     crowd_playing: Option<rodio::Player>,
     crowd_tracks: HashMap<char, PathBuf>,
 }
@@ -67,6 +72,7 @@ impl Sfx {
         Self {
             stream,
             fail_playing: None,
+            lightning_playing: None,
             crowd_playing: None,
             crowd_tracks: scan_crowd_tracks(),
         }
@@ -89,6 +95,27 @@ impl Sfx {
                 self.fail_playing = Some(player);
             }
             Err(err) => log::warn!("failed to decode fail.ogg: {err}"),
+        }
+    }
+
+    /// Crack of thunder for a lightning strike, cutting off one already in
+    /// flight — two bolts can only land a chain apart, but a restart could
+    /// otherwise leave the old one ringing.
+    pub fn lightning(&mut self) {
+        let Some(stream) = &self.stream else {
+            return;
+        };
+
+        self.lightning_playing.take();
+
+        match rodio::Decoder::new(Cursor::new(LIGHTNING_SOUND)) {
+            Ok(source) => {
+                let player = rodio::Player::connect_new(stream.mixer());
+                player.set_volume(LIGHTNING_VOLUME);
+                player.append(source);
+                self.lightning_playing = Some(player);
+            }
+            Err(err) => log::warn!("failed to decode lightning.mp3: {err}"),
         }
     }
 
@@ -131,6 +158,15 @@ impl Sfx {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The embedded clips must decode with the features this crate builds
+    /// with — the lightning is an mp3, and rodio only reads those with the
+    /// `mp3` feature on. Failing here beats a silent strike.
+    #[test]
+    fn embedded_clips_decode() {
+        rodio::Decoder::new(Cursor::new(FAIL_SOUND)).expect("fail.ogg");
+        rodio::Decoder::new(Cursor::new(LIGHTNING_SOUND)).expect("lightning.mp3");
+    }
 
     /// Every crowd track on this machine must actually decode, or the crowd
     /// will silently no-show at the results screen. (Trivially passes where

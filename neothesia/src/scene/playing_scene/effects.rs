@@ -215,6 +215,10 @@ pub struct EffectsSystem {
 
     /// Lightning currently in flight.
     bolts: Vec<Bolt>,
+    /// A bolt landed this frame and its thunder has not been played yet. The
+    /// sound lives with the scene's other audio rather than in here, so the
+    /// strike is reported out instead of played from the middle of scoring.
+    struck: bool,
     /// White-out from a bolt landing; decays over a few frames.
     strike_flash: f32,
     /// Seconds left on the surge a bolt kicks off; 0 when not surging. A wrong
@@ -372,6 +376,7 @@ impl EffectsSystem {
             perfect_chords: 0,
             chord_all_perfect: false,
             bolts: Vec::new(),
+            struck: false,
             strike_flash: 0.0,
             surge: 0.0,
             surge_phase: 0.0,
@@ -485,6 +490,12 @@ impl EffectsSystem {
     /// Is the board still surging from a lightning strike?
     pub fn surging(&self) -> bool {
         self.surge > 0.0
+    }
+
+    /// Did a bolt land since this was last asked? For the thunder that goes
+    /// with it — true once per strike.
+    pub fn take_strike(&mut self) -> bool {
+        std::mem::take(&mut self.struck)
     }
 
     /// Surge brightness 0..1: full while it runs, dimming over the last
@@ -905,6 +916,8 @@ impl EffectsSystem {
             }
             forks.push(fork);
         }
+
+        self.struck = true;
 
         let width = self.rand_range(8.0, 11.0);
         self.bolts.push(Bolt {

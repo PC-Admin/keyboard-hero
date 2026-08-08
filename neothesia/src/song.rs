@@ -50,6 +50,31 @@ impl SongConfig {
         Self::new(tracks, mode == PerformMode::Human)
     }
 
+    /// Re-assign the tracks for `mode`, in place — for a song already loaded
+    /// when the player changes their mind. HUMAN hands the first melodic track
+    /// to the player (the same one the defaults would have picked); the jam
+    /// modes hand it back.
+    ///
+    /// Muted tracks stay muted: muting is a per-track choice about one
+    /// instrument, orthogonal to who performs the song.
+    pub fn apply_mode(&mut self, tracks: &[MidiTrack], mode: PerformMode) {
+        let mut human_assigned = mode != PerformMode::Human;
+
+        for (config, track) in self.tracks.iter_mut().zip(tracks) {
+            if config.player == PlayerConfig::Mute {
+                continue;
+            }
+
+            let is_drums = track.has_drums && !track.has_other_than_drums;
+            config.player = if !human_assigned && !is_drums && !track.notes.is_empty() {
+                human_assigned = true;
+                PlayerConfig::Human
+            } else {
+                PlayerConfig::Auto
+            };
+        }
+    }
+
     /// Rainbow-keys fork: when `default_human` is set, the first melodic
     /// track (has notes, not pure drums) defaults to Human so play-along
     /// scoring works out of the box; everything else accompanies on Auto.
@@ -92,6 +117,11 @@ impl Song {
     pub fn new(file: midi_file::MidiFile, mode: PerformMode) -> Self {
         let config = SongConfig::for_mode(&file.tracks, mode);
         Self { file, config }
+    }
+
+    /// Re-assign this song's tracks for `mode`.
+    pub fn set_mode(&mut self, mode: PerformMode) {
+        self.config.apply_mode(&self.file.tracks, mode);
     }
 
     /// All tracks on Auto — for playback that must not wait on user input

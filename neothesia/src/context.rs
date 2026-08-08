@@ -27,9 +27,9 @@ pub struct Context {
     pub proxy: EventLoopProxy<NeothesiaEvent>,
 
     /// Performer mode the player last chose, so it survives leaving a song:
-    /// every new song is loaded to be performed this way, and the in-game
-    /// toggle writes back here. Session-lived — a fresh launch starts on the
-    /// default again.
+    /// every new song is loaded to be performed this way, and both the menu
+    /// selector and the in-game one write back here. Session-lived — a fresh
+    /// launch starts on HERO again.
     pub perform_mode: PerformMode,
 
     /// Last frame timestamp
@@ -76,8 +76,8 @@ impl Context {
             input_manager: InputManager::new(proxy.clone()),
             config,
             proxy,
-            // Play-along out of the box, matching the track defaults.
-            perform_mode: PerformMode::Human,
+            // The game the app is named for, out of the box.
+            perform_mode: PerformMode::Hero,
             frame_timestamp: std::time::Instant::now(),
 
             #[cfg(debug_assertions)]

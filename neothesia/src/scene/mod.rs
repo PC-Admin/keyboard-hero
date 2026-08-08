@@ -14,6 +14,72 @@ use winit::{
     keyboard::Key,
 };
 
+/// Geometry of the performer selector, so anything that lines up with it (the
+/// playing scene's song title sits directly underneath) measures from here
+/// rather than keeping its own copy of the numbers.
+const SEGMENT_W: f32 = 64.0;
+const SEGMENT_GAP: f32 = 2.0;
+pub const PERFORMER_SELECTOR_W: f32 = SEGMENT_W * 3.0 + SEGMENT_GAP * 2.0;
+pub const PERFORMER_SELECTOR_H: f32 = 32.0;
+/// Inset from the right edge of the window.
+pub const PERFORMER_SELECTOR_MARGIN: f32 = 16.0;
+
+/// Left edge of the performer selector in a window `win_w` wide.
+pub fn performer_selector_x(win_w: f32) -> f32 {
+    win_w - PERFORMER_SELECTOR_W - PERFORMER_SELECTOR_MARGIN
+}
+
+/// The HERO / AUTO / HUMAN performer selector, top-right.
+///
+/// One function, called by both the menu and the playing scene, because the
+/// control is meant to be the same thing in the same place wherever you are —
+/// two copies would be free to drift apart. `top` is the y it hangs from (the
+/// playing scene rides it down as the top bar expands). Returns the mode that
+/// was clicked, if it is not the current one.
+pub fn performer_selector(
+    ui: &mut nuon::Ui,
+    win_w: f32,
+    top: f32,
+    current: crate::song::PerformMode,
+) -> Option<crate::song::PerformMode> {
+    use crate::song::PerformMode;
+
+    let (w, h, gap) = (SEGMENT_W, PERFORMER_SELECTOR_H, SEGMENT_GAP);
+    let x0 = performer_selector_x(win_w);
+
+    let segments = [
+        (PerformMode::Hero, "HERO", [8.0, 0.0, 0.0, 8.0]),
+        (PerformMode::Auto, "AUTO", [0.0; 4]),
+        (PerformMode::Human, "HUMAN", [0.0, 8.0, 8.0, 0.0]),
+    ];
+
+    let mut picked = None;
+
+    for (i, (mode, label, radius)) in segments.into_iter().enumerate() {
+        let active = current == mode;
+        let color = if active {
+            nuon::Color::new_u8(160, 81, 238, 1.0)
+        } else {
+            nuon::Color::new_u8(50, 50, 60, 0.9)
+        };
+
+        if nuon::button()
+            .id(label)
+            .pos(x0 + i as f32 * (w + gap), top)
+            .size(w, h)
+            .color(color)
+            .border_radius(radius)
+            .label(label)
+            .build(ui)
+            && !active
+        {
+            picked = Some(mode);
+        }
+    }
+
+    picked
+}
+
 pub trait Scene {
     fn update(&mut self, ctx: &mut Context, delta: Duration);
     fn render<'pass>(&'pass mut self, rpass: &mut wgpu_jumpstart::RenderPass<'pass>);

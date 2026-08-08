@@ -275,12 +275,12 @@ impl MidiPlayer {
         }
     }
 
-    /// Switch who performs, mid-song. HUMAN re-assigns the first melodic
-    /// non-drum track (the same one the song-setup default picks); the jam
-    /// modes set every Human track back to Auto, with HERO also muting the
-    /// target notes. Ringing notes are silenced and pending targets dropped,
-    /// so a stalled song resumes on the spot instead of waiting for keys
-    /// that are no longer anyone's job.
+    /// Switch who performs, mid-song. The track re-assignment is the same one
+    /// the menu's selector makes, so both routes land a song in the same state;
+    /// HERO differs from AUTO only in the latch, which mutes the target notes.
+    /// Ringing notes are silenced and pending targets dropped, so a stalled
+    /// song resumes on the spot instead of waiting for keys that are no longer
+    /// anyone's job.
     pub fn set_mode(&mut self, mode: PerformMode) {
         if mode == self.mode() {
             return;
@@ -289,23 +289,7 @@ impl MidiPlayer {
         self.clear();
         self.play_along.clear();
         self.hero = mode == PerformMode::Hero;
-
-        if mode == PerformMode::Human {
-            let mut assigned = false;
-            for (i, track) in self.song.file.tracks.iter().enumerate() {
-                let is_drums = track.has_drums && !track.has_other_than_drums;
-                if !assigned && !is_drums && !track.notes.is_empty() {
-                    self.song.config.tracks[i].player = PlayerConfig::Human;
-                    assigned = true;
-                }
-            }
-        } else {
-            for track in self.song.config.tracks.iter_mut() {
-                if matches!(track.player, PlayerConfig::Human) {
-                    track.player = PlayerConfig::Auto;
-                }
-            }
-        }
+        self.song.set_mode(mode);
     }
 
     /// True when at least one track is set to Human, i.e. play-along scoring

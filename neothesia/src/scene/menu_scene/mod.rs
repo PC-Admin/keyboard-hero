@@ -74,7 +74,6 @@ pub struct MenuScene {
     quad_pipeline: QuadRenderer,
     nuon: nuon::Ui,
 
-    tracks_scroll: nuon::ScrollState,
     settings_scroll: nuon::ScrollState,
     favourites: Vec<std::path::PathBuf>,
     fav_selected: usize,
@@ -130,7 +129,6 @@ impl MenuScene {
 
             quad_pipeline,
             nuon: nuon::Ui::new(),
-            tracks_scroll: nuon::ScrollState::new(),
             settings_scroll: nuon::ScrollState::new(),
             favourites,
             fav_selected,
@@ -172,7 +170,6 @@ impl MenuScene {
             Page::Exit => self.exit_page_ui(ctx, &mut nuon),
             Page::Main => self.main_page_ui(ctx, &mut nuon),
             Page::Settings => self.settings_page_ui(ctx, &mut nuon),
-            Page::TrackSelection => self.tracks_page_ui(ctx, &mut nuon),
         }
 
         self.nuon = nuon;
@@ -257,8 +254,19 @@ impl MenuScene {
                         let list_gap = 16.0;
 
                         let buttons_h = 3.0 * h + 2.0 * gap;
-                        let list_room =
-                            win_h - favourites::BOTTOM_RESERVED - buttons_h - list_gap - list_top;
+                        // The track rows sit between the list and the buttons
+                        // and have first claim on the room — the favourites
+                        // list is the elastic one. (The performer selector is
+                        // in the corner and takes nothing from this column.)
+                        let tracks_h = self.track_list_height();
+                        let tracks_gap = if tracks_h > 0.0 { 14.0 } else { 0.0 };
+                        let list_room = win_h
+                            - favourites::BOTTOM_RESERVED
+                            - buttons_h
+                            - list_gap
+                            - list_top
+                            - tracks_h
+                            - tracks_gap;
                         let list_h = self.favourites_preferred_height().min(list_room.max(0.0));
 
                         // Scoped: the list advances the origin as it draws,
@@ -272,6 +280,10 @@ impl MenuScene {
                         });
 
                         nuon::translate().y(list_h + list_gap).add_to_current(ui);
+
+                        self.track_list_ui(ctx, ui, w);
+
+                        nuon::translate().y(tracks_h + tracks_gap).add_to_current(ui);
 
                         if neo_btn().size(w, h).label("Select File").build(ui) {
                             self.futures.push(open_midi_file_picker(&mut self.state));
@@ -336,19 +348,12 @@ impl MenuScene {
                 {
                     state::play(&self.state, ctx);
                 }
-
-                nuon::translate().x(-btn_w - gap).add_to_current(ui);
-
-                if neo_btn()
-                    .size(btn_w, btn_h)
-                    .icon(icons::note_list_icon())
-                    .tooltip("Tracks")
-                    .build(ui)
-                {
-                    self.state.go_to(Page::TrackSelection);
-                }
             });
         });
+
+        // Corner-anchored, and drawn last: hit testing goes to whatever was
+        // drawn on top, and the favourites list reaches across the window.
+        self.performer_selector_ui(ctx, ui);
     }
 }
 
@@ -400,11 +405,10 @@ impl Scene for MenuScene {
             let over_favourites = *self.state.current() == Page::Main
                 && self.favourites_scroll(nuon::Point::new(cursor.x, cursor.y), amount);
 
-            // The favourites list sits on the main page, where neither of
-            // these is visible, but keep the wheel to one list at a time.
+            // The favourites list sits on the main page, where the settings
+            // list is not visible, but keep the wheel to one list at a time.
             if !over_favourites {
                 self.settings_scroll.update(amount);
-                self.tracks_scroll.update(amount);
             }
         }
 
@@ -456,24 +460,11 @@ impl Scene for MenuScene {
                     self.state.go_to(Page::Settings);
                 }
 
-                if event.key_pressed(Key::Character("t")) {
-                    self.state.go_to(Page::TrackSelection);
-                }
-
                 if event.key_pressed(Key::Character("f")) {
                     state::freeplay(&self.state, ctx);
                 }
             }
             Page::Settings => {
-                if event.key_pressed(Key::Named(NamedKey::Escape)) {
-                    self.state.go_back();
-                }
-            }
-            Page::TrackSelection => {
-                if event.key_pressed(Key::Named(NamedKey::Enter)) {
-                    state::play(&self.state, ctx);
-                }
-
                 if event.key_pressed(Key::Named(NamedKey::Escape)) {
                     self.state.go_back();
                 }
