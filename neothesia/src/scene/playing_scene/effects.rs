@@ -57,8 +57,10 @@ const CHORD_WINDOW: std::time::Duration = std::time::Duration::from_millis(30);
 /// nailed dead-on counts whether those chords are single notes or fistfuls.
 pub const BOLT_CHORDS: u32 = 5;
 /// How long the board stays lit after a bolt lands. Long enough to be worth
-/// pushing for, short enough that it has to be re-earned.
-const SURGE_SECS: f32 = 8.0;
+/// pushing for and to carry a phrase or two, short enough that it has to be
+/// re-earned — and the chain is frozen throughout, so this is also how long the
+/// next one is held off.
+const SURGE_SECS: f32 = 12.0;
 /// Score boost while surging, as a fraction: +50% per note.
 const SURGE_NUM: u64 = 3;
 const SURGE_DEN: u64 = 2;
