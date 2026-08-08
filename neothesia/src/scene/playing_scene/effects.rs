@@ -487,11 +487,6 @@ impl EffectsSystem {
         self.surge > 0.0
     }
 
-    /// Whole seconds left on the surge, for the HUD countdown.
-    pub fn surge_secs_left(&self) -> u32 {
-        self.surge.ceil().max(0.0) as u32
-    }
-
     /// Surge brightness 0..1: full while it runs, dimming over the last
     /// second so the lights fade out instead of snapping off.
     pub fn surge_intensity(&self) -> f32 {
@@ -1548,28 +1543,6 @@ impl EffectsSystem {
         BOLT_CHORDS as f32 * (PIP + GAP) - GAP
     }
 
-    /// Pulsing halo behind the top-left score readout while surging, so the
-    /// number the bonus is inflating is visibly the one being inflated.
-    pub fn render_surge_score_glow(&self, quads: &mut QuadRenderer, x: f32, y: f32, w: f32, h: f32) {
-        if !self.surging() {
-            return;
-        }
-
-        let k = self.surge_intensity();
-        let pulse = self.surge_pulse();
-        let [r, g, b] = ARC_TINT;
-
-        for (grow, alpha) in [(14.0, 0.10), (7.0, 0.16), (2.0, 0.22)] {
-            let pad = grow * (0.7 + 0.3 * pulse);
-            let (gw, gh) = (w + pad * 2.0, h + pad * 2.0);
-            quads.push(QuadInstance {
-                position: [x - pad, y - pad],
-                size: [gw, gh],
-                color: [r, g, b, alpha * (0.6 + 0.4 * pulse) * k],
-                border_radius: [(gh * 0.5).min(gw * 0.5); 4],
-            });
-        }
-    }
 }
 
 /// Rainbow palette matching the white-key squares, in linear RGB.
@@ -1934,21 +1907,21 @@ mod tests {
 
         perfect_chords(&mut fx, start, BOLT_CHORDS as u64);
         assert!(fx.surging());
-        let struck_at = fx.surge_secs_left();
 
-        // A whole clean chain played inside the surge banks nothing and, above
-        // all, does not top the timer back up.
-        fx.update(2.0, 100.0, 0.0, 500.0);
+        // Two seconds in, play a whole clean chain. It banks nothing...
+        let spent = 2.0;
+        fx.update(spent, 100.0, 0.0, 500.0);
         perfect_chords(
             &mut fx,
             start + Duration::from_millis(100 * BOLT_CHORDS as u64),
             BOLT_CHORDS as u64,
         );
         assert_eq!(fx.perfect_chords(), 0);
-        assert!(fx.surge_secs_left() < struck_at);
 
-        // Once it expires, the same playing earns a fresh strike.
-        fx.update(super::SURGE_SECS, 100.0, 0.0, 500.0);
+        // ...and, above all, has not topped the timer back up: running the
+        // clock out the *remaining* few seconds still ends the surge. Had it
+        // re-struck, there would be a full window left to burn here.
+        fx.update(super::SURGE_SECS - spent + 0.01, 100.0, 0.0, 500.0);
         assert!(!fx.surging());
 
         let later = start + Duration::from_secs(30);

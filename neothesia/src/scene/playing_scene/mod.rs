@@ -664,59 +664,32 @@ impl PlayingScene {
                 .size(160.0, 12.0)
                 .build(&mut self.nuon);
 
-            // Score readout — lit up and worth half again as much while the
-            // lightning's surge holds.
+            // Score readout. Nothing but its colour marks the surge: it turns
+            // electric blue for as long as notes are worth half again as much,
+            // and the keyboard behind it is already saying the rest.
             let surging = self.effects.surging();
-            let score_text = format!("SCORE {}", effects::thousands(self.effects.score()));
-            let score_size = if surging { 17.0 } else { 14.0 };
+            const SCORE_SIZE: f32 = 14.0;
             let score_y = hud_top + 86.0;
 
-            if surging {
-                // Halo sized to the text rather than the label box, so it hugs
-                // the number instead of trailing off to the right.
-                let buffer = TextRenderer::gen_buffer(score_size, &score_text);
-                let width = TextRenderer::measure(&buffer).0;
-                self.effects.render_surge_score_glow(
-                    &mut self.quad_renderer_fg,
-                    16.0,
-                    score_y,
-                    width,
-                    score_size,
-                );
-            }
-
             nuon::label()
-                .text(score_text)
-                .font_size(score_size)
+                .text(format!("SCORE {}", effects::thousands(self.effects.score())))
+                .font_size(SCORE_SIZE)
                 .color(if surging {
-                    nuon::Color::new_u8(200, 245, 255, 1.0)
+                    nuon::Color::new_u8(105, 195, 255, 1.0)
                 } else {
                     nuon::Color::new_u8(255, 222, 84, 1.0)
                 })
                 .bold(true)
                 .text_justify(nuon::TextJustify::Left)
                 .pos(16.0, score_y)
-                .size(220.0, score_size)
+                .size(220.0, SCORE_SIZE)
                 .build(&mut self.nuon);
 
-            // One slot below the score, shared by the two states of the
-            // lightning: charging up, or spending the surge it bought.
-            let row_y = score_y + score_size + 6.0;
-
-            if surging {
-                nuon::label()
-                    .text(format!(
-                        "LIGHTNING x1.5   {}s",
-                        self.effects.surge_secs_left()
-                    ))
-                    .font_size(12.0)
-                    .color(nuon::Color::new_u8(150, 230, 255, 1.0))
-                    .bold(true)
-                    .text_justify(nuon::TextJustify::Left)
-                    .pos(16.0, row_y)
-                    .size(220.0, 12.0)
-                    .build(&mut self.nuon);
-            } else if self.effects.perfect_chords() > 0 {
+            // Charge pips for the next bolt, in the slot below the score. Only
+            // while it is being built — during a surge there is nothing to
+            // charge, and the blue score says so.
+            if !surging && self.effects.perfect_chords() > 0 {
+                let row_y = score_y + SCORE_SIZE + 6.0;
                 let pips_w =
                     self.effects
                         .render_bolt_charge(&mut self.quad_renderer_fg, 16.0, row_y + 6.0);
