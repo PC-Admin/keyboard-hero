@@ -328,6 +328,55 @@ impl PlayingScene {
         self.effects.update(dt, hit_line_y, pos.x, board_width);
     }
 
+    /// Electric wash while a lightning strike's surge holds: the keyboard, the
+    /// hit line and every falling bar on screen light up. Drawn under the
+    /// particles and the bolt itself, which stay the brightest things around.
+    fn render_surge(&mut self, ctx: &Context, time: f32) {
+        let pos = *self.keyboard.pos();
+        let board_width = self.keyboard.layout().width;
+
+        self.effects.render_surge_glow(
+            &mut self.quad_renderer_fg,
+            pos.y,
+            pos.x,
+            board_width,
+            ctx.window_state.logical_size.width,
+            ctx.window_state.logical_size.height,
+        );
+
+        if !self.effects.surging() {
+            return;
+        }
+
+        // Only bars anywhere near the lane are worth a glow quad; the rest of
+        // the song is minutes away in either direction.
+        let range_start = self.keyboard.range().start();
+        let keys = &self.keyboard.layout().keys;
+        let bars = self
+            .waterfall
+            .notes()
+            .iter()
+            .filter(|n| n.channel != 9)
+            .filter(|n| n.end.as_secs_f32() > time - 0.5 && n.start.as_secs_f32() < time + 20.0)
+            .filter_map(|n| {
+                let key = keys.get(n.note.wrapping_sub(range_start) as usize)?;
+                Some((
+                    pos.x + key.x(),
+                    key.width() - 1.0,
+                    n.start.as_secs_f32(),
+                    n.duration.as_secs_f32(),
+                ))
+            });
+
+        self.effects.render_surge_notes(
+            &mut self.quad_renderer_fg,
+            bars,
+            time,
+            ctx.config.animation_speed() / ctx.window_state.scale_factor as f32,
+            pos.y,
+        );
+    }
+
     /// Guitar-Hero HUD: top-left streak counter + audience sentiment, rising
     /// PERFECT/GOOD grades out of the keys, and the pulsing combo counter.
     /// Arcade results screen shown over the dimmed scene when a play-along
@@ -615,15 +664,76 @@ impl PlayingScene {
                 .size(160.0, 12.0)
                 .build(&mut self.nuon);
 
+            // Score readout — lit up and worth half again as much while the
+            // lightning's surge holds.
+            let surging = self.effects.surging();
+            let score_text = format!("SCORE {}", effects::thousands(self.effects.score()));
+            let score_size = if surging { 17.0 } else { 14.0 };
+            let score_y = hud_top + 86.0;
+
+            if surging {
+                // Halo sized to the text rather than the label box, so it hugs
+                // the number instead of trailing off to the right.
+                let buffer = TextRenderer::gen_buffer(score_size, &score_text);
+                let width = TextRenderer::measure(&buffer).0;
+                self.effects.render_surge_score_glow(
+                    &mut self.quad_renderer_fg,
+                    16.0,
+                    score_y,
+                    width,
+                    score_size,
+                );
+            }
+
             nuon::label()
-                .text(format!("SCORE {}", effects::thousands(self.effects.score())))
-                .font_size(14.0)
-                .color(nuon::Color::new_u8(255, 222, 84, 1.0))
+                .text(score_text)
+                .font_size(score_size)
+                .color(if surging {
+                    nuon::Color::new_u8(200, 245, 255, 1.0)
+                } else {
+                    nuon::Color::new_u8(255, 222, 84, 1.0)
+                })
                 .bold(true)
                 .text_justify(nuon::TextJustify::Left)
-                .pos(16.0, hud_top + 86.0)
-                .size(220.0, 14.0)
+                .pos(16.0, score_y)
+                .size(220.0, score_size)
                 .build(&mut self.nuon);
+
+            // One slot below the score, shared by the two states of the
+            // lightning: charging up, or spending the surge it bought.
+            let row_y = score_y + score_size + 6.0;
+
+            if surging {
+                nuon::label()
+                    .text(format!(
+                        "LIGHTNING x1.5   {}s",
+                        self.effects.surge_secs_left()
+                    ))
+                    .font_size(12.0)
+                    .color(nuon::Color::new_u8(150, 230, 255, 1.0))
+                    .bold(true)
+                    .text_justify(nuon::TextJustify::Left)
+                    .pos(16.0, row_y)
+                    .size(220.0, 12.0)
+                    .build(&mut self.nuon);
+            } else if self.effects.perfect_chords() > 0 {
+                let pips_w =
+                    self.effects
+                        .render_bolt_charge(&mut self.quad_renderer_fg, 16.0, row_y + 6.0);
+
+                nuon::label()
+                    .text(format!(
+                        "PERFECT CHAIN {}/{}",
+                        self.effects.perfect_chords(),
+                        effects::BOLT_CHORDS
+                    ))
+                    .font_size(12.0)
+                    .color(nuon::Color::new_u8(150, 200, 230, 1.0))
+                    .text_justify(nuon::TextJustify::Left)
+                    .pos(16.0 + pips_w + 8.0, row_y)
+                    .size(220.0, 12.0)
+                    .build(&mut self.nuon);
+            }
 
             // The audience weighs in: a drawn face + speedometer-style dial.
             if let Some(level) = self.effects.sentiment_level() {
@@ -848,6 +958,7 @@ impl Scene for PlayingScene {
             }
         }
 
+        self.render_surge(ctx, time);
         self.effects.render(&mut self.quad_renderer_fg);
         self.effects.render_note_flashes(
             &mut self.quad_renderer_fg,
@@ -855,6 +966,7 @@ impl Scene for PlayingScene {
             ctx.config.animation_speed() / ctx.window_state.scale_factor as f32,
             self.keyboard.pos().y,
         );
+        self.effects.render_bolts(&mut self.quad_renderer_fg);
         self.update_hud(ctx, delta);
 
         TopBar::update(self, ctx);
