@@ -180,6 +180,7 @@ impl PlayingScene {
             song,
             keyboard_layout.range.clone(),
             ctx.config.separate_channels(),
+            ctx.perform_mode,
         );
         waterfall.update(player.time_without_lead_in());
 
@@ -493,7 +494,7 @@ impl PlayingScene {
         }
     }
 
-    fn update_hud(&mut self, ctx: &Context, delta: Duration) {
+    fn update_hud(&mut self, ctx: &mut Context, delta: Duration) {
         if self.finished {
             self.results_overlay_ui(ctx);
             return;
@@ -546,6 +547,10 @@ impl PlayingScene {
                     && !active
                 {
                     self.player.set_mode(seg_mode);
+                    // Remembered for the session, so leaving the song — to
+                    // replay it or to pick another — comes back to the mode
+                    // the player asked for rather than the song's default.
+                    ctx.perform_mode = seg_mode;
                     // Snap the marquee back to its starting point: a switch
                     // you can see even when the music does not change much.
                     self.title_scroll = 0.0;

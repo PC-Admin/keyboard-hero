@@ -151,6 +151,9 @@ impl Preview {
             keyboard.layout().range.clone(),
             ctx.config.separate_channels(),
             Duration::ZERO,
+            // Playing a recording back to the user, not asking them to perform
+            // it — regardless of how they last played a song.
+            crate::song::PerformMode::Auto,
         );
         player.pause();
         waterfall.update(player.time_without_lead_in() + ctx.config.animation_offset());

@@ -55,10 +55,7 @@ const CHORD_WINDOW: std::time::Duration = std::time::Duration::from_millis(30);
 /// Consecutive chords struck entirely on PERFECT timing needed for the
 /// lightning — alongside a maxed-out crowd. Chords, not keys, so a phrase
 /// nailed dead-on counts whether those chords are single notes or fistfuls.
-///
-/// TEMPORARY: dialled down to 2 so the effect is easy to trigger by hand.
-/// Put it back to 5 for real play.
-pub const BOLT_CHORDS: u32 = 2;
+pub const BOLT_CHORDS: u32 = 5;
 /// How long the board stays lit after a bolt lands. Long enough to be worth
 /// pushing for, short enough that it has to be re-earned.
 const SURGE_SECS: f32 = 8.0;

@@ -13,7 +13,7 @@ pub fn open_midi_file_picker(data: &mut UiState) -> BoxFuture<MsgFn> {
     on_async(open_midi_file_picker_fut(), |res, data, ctx| {
         if let Some((midi, path)) = res {
             ctx.config.set_last_opened_song(Some(path));
-            data.song = Some(Song::new(midi));
+            data.song = Some(Song::new(midi, ctx.perform_mode));
         }
         data.is_loading = false;
     })

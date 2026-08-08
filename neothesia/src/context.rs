@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::{
     NeothesiaEvent, TransformUniform, config::Config, input_manager::InputManager,
-    output_manager::OutputManager, utils::window::WindowState,
+    output_manager::OutputManager, song::PerformMode, utils::window::WindowState,
 };
 use neothesia_core::render::{QuadRendererFactory, TextRendererFactory};
 use wgpu_jumpstart::{Gpu, Uniform};
@@ -25,6 +25,12 @@ pub struct Context {
     pub config: Config,
 
     pub proxy: EventLoopProxy<NeothesiaEvent>,
+
+    /// Performer mode the player last chose, so it survives leaving a song:
+    /// every new song is loaded to be performed this way, and the in-game
+    /// toggle writes back here. Session-lived — a fresh launch starts on the
+    /// default again.
+    pub perform_mode: PerformMode,
 
     /// Last frame timestamp
     pub frame_timestamp: std::time::Instant,
@@ -70,6 +76,8 @@ impl Context {
             input_manager: InputManager::new(proxy.clone()),
             config,
             proxy,
+            // Play-along out of the box, matching the track defaults.
+            perform_mode: PerformMode::Human,
             frame_timestamp: std::time::Instant::now(),
 
             #[cfg(debug_assertions)]

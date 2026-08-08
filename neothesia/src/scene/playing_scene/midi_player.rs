@@ -4,24 +4,12 @@ use crate::{
     output_manager::OutputConnection,
     song::{PlayerConfig, Song},
 };
+pub use crate::song::PerformMode;
 use neothesia_core::piano_layout;
 use std::{
     collections::{HashMap, HashSet},
     time::{Duration, Instant},
 };
-
-/// Who performs the song, cycled by the in-game toggle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PerformMode {
-    /// The song rolls but its target notes stay *silent* — the player
-    /// supplies them, Guitar-Hero style. Graded like Auto.
-    Hero,
-    /// The song plays itself audibly; the player may jam over the top and
-    /// is graded on whatever they play. Never stalls.
-    Auto,
-    /// Classic play-along: the song stalls and waits for the player.
-    Human,
-}
 
 pub struct MidiPlayer {
     playback: midi_file::PlaybackState,
@@ -29,7 +17,9 @@ pub struct MidiPlayer {
     song: Song,
     play_along: PlayAlong,
     separate_channels: bool,
-    /// HERO mode latch: only meaningful while no track is Human.
+    /// HERO rather than AUTO: only meaningful while no track is Human, since
+    /// nothing in the track config tells the two jam modes apart. Seeded from
+    /// the mode the player last chose and read back out by [`Self::mode`].
     hero: bool,
 }
 
@@ -39,6 +29,7 @@ impl MidiPlayer {
         song: Song,
         user_keyboard_range: piano_layout::KeyboardRange,
         separate_channels: bool,
+        mode: PerformMode,
     ) -> Self {
         Self::new_with_lead_in(
             output,
@@ -46,6 +37,7 @@ impl MidiPlayer {
             user_keyboard_range,
             separate_channels,
             Duration::from_secs(3),
+            mode,
         )
     }
 
@@ -55,6 +47,7 @@ impl MidiPlayer {
         user_keyboard_range: piano_layout::KeyboardRange,
         separate_channels: bool,
         lead_in: Duration,
+        mode: PerformMode,
     ) -> Self {
         let mut player = Self {
             playback: midi_file::PlaybackState::new(lead_in, song.file.tracks.clone()),
@@ -62,7 +55,10 @@ impl MidiPlayer {
             play_along: PlayAlong::new(user_keyboard_range),
             song,
             separate_channels,
-            hero: false,
+            // HUMAN vs the jam modes is already settled by the track
+            // assignments this song was loaded with; all that is left to carry
+            // in is which of the two jam modes was asked for.
+            hero: mode == PerformMode::Hero,
         };
         // Let's reset programs,
         // for timestamp 0 most likely all programs will be 0, so this should clean any leftovers

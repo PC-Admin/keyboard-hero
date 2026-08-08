@@ -302,7 +302,7 @@ impl super::MenuScene {
         match midi_file::MidiFile::new(path) {
             Ok(midi) => {
                 ctx.config.set_last_opened_song(Some(path.clone()));
-                self.state.song = Some(Song::new(midi));
+                self.state.song = Some(Song::new(midi, ctx.perform_mode));
             }
             Err(e) => {
                 log::error!("failed to load favourite: {e}");
