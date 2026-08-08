@@ -8,6 +8,19 @@ use midi_file::midly::{self, num::u4};
 #[cfg(all(feature = "fluid-synth", not(feature = "oxi-synth")))]
 const SAMPLES_SIZE: usize = 1410;
 
+/// Frames per callback to ask the device for.
+///
+/// This synth is played live, so the buffer is the delay between pressing a key
+/// and hearing it. Left to the device default that is whatever the audio server
+/// negotiated for everything else — commonly 1024 frames, about 21ms at 48kHz,
+/// which is enough to feel. 256 is around 5ms and reads as immediate, while
+/// staying far enough from the edge to keep the callback fed.
+///
+/// Asked for per stream on purpose, rather than by forcing the server's global
+/// quantum: this way it applies while the game is running and leaves the rest of
+/// the machine alone.
+const TARGET_BUFFER_FRAMES: u32 = 256;
+
 pub struct SynthBackend {
     _host: cpal::Host,
     device: cpal::Device,
@@ -28,7 +41,22 @@ impl SynthBackend {
         let config = device.default_output_config()?;
         let sample_format = config.sample_format();
 
-        let stream_config: cpal::StreamConfig = config.into();
+        // Clamped to what the device will actually accept; if the backend will
+        // not say what that is, leave the default rather than guess at it.
+        let buffer_size = match config.buffer_size() {
+            cpal::SupportedBufferSize::Range { min, max } => {
+                cpal::BufferSize::Fixed(TARGET_BUFFER_FRAMES.clamp(*min, *max))
+            }
+            cpal::SupportedBufferSize::Unknown => cpal::BufferSize::Default,
+        };
+
+        let mut stream_config: cpal::StreamConfig = config.into();
+        stream_config.buffer_size = buffer_size;
+        log::info!(
+            "synth output: {} Hz, buffer {:?}",
+            stream_config.sample_rate,
+            stream_config.buffer_size
+        );
 
         Ok(Self {
             _host: host,
