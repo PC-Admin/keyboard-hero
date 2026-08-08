@@ -25,7 +25,10 @@ const FAIL_VOLUME: f32 = 0.7;
 /// mastered loud, so anywhere near their level it lands as an explosion over
 /// the music rather than as weather behind it.
 const LIGHTNING_VOLUME: f32 = 0.15;
-const CROWD_VOLUME: f32 = 0.9;
+/// The crowd clips are mastered loud, and at 0.9 they arrived as a jump-scare
+/// over a synth that runs at a fraction of full scale. Brought down to meet it
+/// rather than pushing the piano up to match them.
+const CROWD_VOLUME: f32 = 0.3;
 const BANDS: [char; 5] = ['A', 'B', 'C', 'D', 'F'];
 
 /// Scan `~/Music/FX` for `*_<band>.<ext>` files, one winner per band.

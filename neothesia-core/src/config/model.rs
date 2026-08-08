@@ -223,8 +223,18 @@ fn default_note_labels() -> bool {
     false
 }
 
+/// Master gain handed to the synth. A *linear* amplitude multiplier (oxisynth
+/// clamps it to 0.0..=10.0), applied per voice as `gain / 32768.0` against
+/// 16-bit samples — so 1.0 is about one full-velocity note filling the output on
+/// its own, with nothing left for the notes either side of it. Voices sum, and
+/// this app plays chords with the sustain down, so the ceiling comes up fast.
+///
+/// FluidSynth's 0.2, which oxisynth inherits, is pitched at that worst case and
+/// leaves a piano far too quiet next to everything else on the desktop. 0.4 is
+/// twice that with room to spare; the Settings spinner goes up in tenths from
+/// here for anyone whose soundfont is quieter still.
 fn default_audio_gain() -> f32 {
-    0.2
+    0.4
 }
 
 fn default_vertical_guidelines() -> bool {
