@@ -3,6 +3,7 @@
 mod context;
 mod icons;
 mod input_manager;
+mod microphone;
 mod output_manager;
 mod scene;
 mod song;

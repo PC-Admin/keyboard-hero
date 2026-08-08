@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use crate::{
     NeothesiaEvent, TransformUniform, config::Config, input_manager::InputManager,
-    output_manager::OutputManager, song::PerformMode, utils::window::WindowState,
+    microphone::MicPassthrough, output_manager::OutputManager, song::PerformMode,
+    utils::window::WindowState,
 };
 use neothesia_core::render::{QuadRendererFactory, TextRendererFactory};
 use wgpu_jumpstart::{Gpu, Uniform};
@@ -22,6 +23,10 @@ pub struct Context {
 
     pub output_manager: OutputManager,
     pub input_manager: InputManager,
+    /// Singing along: off at launch, and stays wherever the player left it for
+    /// the rest of the session — including into a song, which is the point of
+    /// switching it on from the menu.
+    pub mic_passthrough: MicPassthrough,
     pub config: Config,
 
     pub proxy: EventLoopProxy<NeothesiaEvent>,
@@ -74,6 +79,7 @@ impl Context {
 
             output_manager: Default::default(),
             input_manager: InputManager::new(proxy.clone()),
+            mic_passthrough: Default::default(),
             config,
             proxy,
             // The game the app is named for, out of the box.

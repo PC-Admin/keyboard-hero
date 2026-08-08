@@ -10,8 +10,8 @@ default = ["oxi-synth"]
 
 profiling-on = ["profiling/profile-with-puffin", "puffin", "puffin_http"]
 synth = []
-fluid-synth = ["synth", "cpal", "fluidlite", "oxisynth"]
-oxi-synth = ["synth", "cpal", "oxisynth"]
+fluid-synth = ["synth", "fluidlite", "oxisynth"]
+oxi-synth = ["synth", "oxisynth"]
 
 [dependencies]
 thiserror.workspace = true
@@ -33,7 +33,9 @@ lilt.workspace = true
 winit.workspace = true
 rfd.workspace = true
 
-cpal = { workspace = true, optional = true }
+# Not optional: the microphone passthrough uses it whether or not the built-in
+# synth is compiled in, and rodio already pulls a copy of it in regardless.
+cpal.workspace = true
 rodio = { version = "0.22", default-features = false, features = ["playback", "vorbis", "mp3", "wav"] }
 fluidlite = { workspace = true, optional = true }
 oxisynth = { workspace = true, optional = true }
