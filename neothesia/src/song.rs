@@ -2,6 +2,13 @@ use midi_file::MidiTrack;
 
 use crate::context::Context;
 
+/// What is to be done with one track.
+///
+/// `Human` marks the track as *the player's part*, which is what makes playing
+/// one-handed possible: hand a track to `Auto` and the app performs it while you
+/// keep the rest. How your own parts are then treated is the
+/// [`PerformMode`]'s business — HUMAN waits for them, HERO silences them and
+/// rolls on.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum PlayerConfig {
     Mute,
@@ -9,24 +16,20 @@ pub enum PlayerConfig {
     Human,
 }
 
-/// Who performs the song, as chosen by the in-game toggle.
+/// How the player's parts are performed. Which parts are theirs is a separate,
+/// per-track question — see [`PlayerConfig`].
 ///
-/// This is the high-level statement of intent; [`PlayerConfig`] is its
-/// per-track consequence, and what the rest of the engine actually reads.
-/// HUMAN is expressed entirely in the track assignments, so it travels with a
-/// song. HERO differs from AUTO only in muting the target notes — nothing in
-/// the track config distinguishes them — so the choice is remembered on
-/// [`crate::context::Context`] for the session and applied to each song as it
-/// is loaded.
+/// Remembered on [`crate::context::Context`] for the session and applied to
+/// each song as it loads, so choosing a mode once holds across songs.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum PerformMode {
-    /// The song rolls but its target notes stay *silent* — the player
-    /// supplies them, Guitar-Hero style. Graded like Auto.
+    /// The song rolls on, but the player's parts stay *silent* — theirs to
+    /// perform, Guitar-Hero style. Never stalls.
     Hero,
-    /// The song plays itself audibly; the player may jam over the top and
-    /// is graded on whatever they play. Never stalls.
+    /// The song plays itself in full; the player may jam over the top and is
+    /// graded on whatever they play. Never stalls, and claims no parts.
     Auto,
-    /// Classic play-along: the song stalls and waits for the player.
+    /// Classic play-along: the song stalls and waits for the player's parts.
     Human,
 }
 
@@ -43,35 +46,53 @@ pub struct SongConfig {
 }
 
 impl SongConfig {
-    /// Track assignments for a song about to be performed in `mode`. Only
-    /// HUMAN wants a Human track; the jam modes leave everything on Auto and
-    /// are told apart by the player, not by the track config.
+    /// Track assignments for a song about to be performed in `mode`.
     fn for_mode(tracks: &[MidiTrack], mode: PerformMode) -> Self {
-        Self::new(tracks, mode == PerformMode::Human)
+        let mut config = Self::new(tracks, false);
+        config.apply_mode(tracks, mode);
+        config
     }
 
-    /// Re-assign the tracks for `mode`, in place — for a song already loaded
-    /// when the player changes their mind. HUMAN hands the first melodic track
-    /// to the player (the same one the defaults would have picked); the jam
-    /// modes hand it back.
+    /// Which tracks are the player's, for `mode`, in place.
     ///
-    /// Muted tracks stay muted: muting is a per-track choice about one
-    /// instrument, orthogonal to who performs the song.
+    /// Only fills in a default, and only when the song does not already say:
+    /// AUTO claims nothing, HUMAN takes one part (the first melodic track —
+    /// waiting for both hands is not a sensible starting point), and HERO takes
+    /// the lot, which is what makes a song you have not touched play as a
+    /// Guitar-Hero chart.
+    ///
+    /// A song that *does* already have parts assigned keeps them, so handing one
+    /// hand to the app survives switching modes. Muted tracks stay muted:
+    /// muting is about one instrument, not about who performs.
     pub fn apply_mode(&mut self, tracks: &[MidiTrack], mode: PerformMode) {
-        let mut human_assigned = mode != PerformMode::Human;
+        if mode == PerformMode::Auto {
+            for config in self.tracks.iter_mut() {
+                if config.player == PlayerConfig::Human {
+                    config.player = PlayerConfig::Auto;
+                }
+            }
+            return;
+        }
+
+        if self.tracks.iter().any(|t| t.player == PlayerConfig::Human) {
+            return;
+        }
+
+        let playable = |track: &MidiTrack| {
+            let is_drums = track.has_drums && !track.has_other_than_drums;
+            !is_drums && !track.notes.is_empty()
+        };
 
         for (config, track) in self.tracks.iter_mut().zip(tracks) {
-            if config.player == PlayerConfig::Mute {
+            if config.player == PlayerConfig::Mute || !playable(track) {
                 continue;
             }
 
-            let is_drums = track.has_drums && !track.has_other_than_drums;
-            config.player = if !human_assigned && !is_drums && !track.notes.is_empty() {
-                human_assigned = true;
-                PlayerConfig::Human
-            } else {
-                PlayerConfig::Auto
-            };
+            config.player = PlayerConfig::Human;
+
+            if mode == PerformMode::Human {
+                break;
+            }
         }
     }
 
@@ -193,16 +214,56 @@ mod tests {
         assert_eq!(humans(&config), vec![1]);
     }
 
-    /// The jam modes have nobody waiting on the player, and it is the absence
-    /// of a Human track that says so. Getting this wrong is what used to strand
-    /// a HERO player in a song that stalled — or reported the wrong mode.
+    /// AUTO claims nothing: the app performs the whole song and the player
+    /// merely jams over it.
     #[test]
-    fn a_song_loaded_for_a_jam_mode_has_no_human_track() {
+    fn a_song_loaded_for_auto_claims_nothing() {
         let tracks = [track(0, false), track(1, false)];
+        let config = SongConfig::for_mode(&tracks, PerformMode::Auto);
 
-        for mode in [PerformMode::Hero, PerformMode::Auto] {
-            let config = SongConfig::for_mode(&tracks, mode);
-            assert!(humans(&config).is_empty(), "{mode:?} wants no Human track");
+        assert!(humans(&config).is_empty());
+    }
+
+    /// HERO claims every melodic part, so a song nobody has configured plays as
+    /// a Guitar-Hero chart rather than playing itself.
+    #[test]
+    fn a_song_loaded_for_hero_claims_every_melodic_part() {
+        let tracks = [track(0, true), track(1, false), track(2, false)];
+        let config = SongConfig::for_mode(&tracks, PerformMode::Hero);
+
+        assert_eq!(humans(&config), vec![1, 2]);
+    }
+
+    /// Handing one hand to the app is the point of the per-track buttons, so it
+    /// has to survive switching how the song is performed — the mode only fills
+    /// in a default when the song has not been told.
+    #[test]
+    fn a_part_handed_to_the_app_survives_a_mode_switch() {
+        let tracks = [track(0, false), track(1, false)];
+        let mut config = SongConfig::for_mode(&tracks, PerformMode::Hero);
+        assert_eq!(humans(&config), vec![0, 1]);
+
+        // "You take the left hand, I'll play the right."
+        config.tracks[0].player = PlayerConfig::Auto;
+
+        for mode in [PerformMode::Human, PerformMode::Hero] {
+            config.apply_mode(&tracks, mode);
+            assert_eq!(humans(&config), vec![1], "{mode:?} kept the assignment");
         }
+    }
+
+    /// Muting is about one instrument, not about who performs, so a mode switch
+    /// leaves it alone — and nothing ever hands the player a drums-only track.
+    #[test]
+    fn muted_and_drum_tracks_are_never_claimed() {
+        let tracks = [track(0, true), track(1, false), track(2, false)];
+        let mut config = SongConfig::for_mode(&tracks, PerformMode::Auto);
+        config.tracks[1].player = PlayerConfig::Mute;
+
+        config.apply_mode(&tracks, PerformMode::Hero);
+
+        assert_eq!(humans(&config), vec![2]);
+        assert_eq!(config.tracks[0].player, PlayerConfig::Auto);
+        assert_eq!(config.tracks[1].player, PlayerConfig::Mute);
     }
 }

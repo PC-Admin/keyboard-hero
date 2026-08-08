@@ -254,19 +254,11 @@ impl MenuScene {
                         let list_gap = 16.0;
 
                         let buttons_h = 3.0 * h + 2.0 * gap;
-                        // The track rows sit between the list and the buttons
-                        // and have first claim on the room — the favourites
-                        // list is the elastic one. (The performer selector is
-                        // in the corner and takes nothing from this column.)
-                        let tracks_h = self.track_list_height();
-                        let tracks_gap = if tracks_h > 0.0 { 14.0 } else { 0.0 };
-                        let list_room = win_h
-                            - favourites::BOTTOM_RESERVED
-                            - buttons_h
-                            - list_gap
-                            - list_top
-                            - tracks_h
-                            - tracks_gap;
+                        // The parts list and the performer selector are both
+                        // corner-anchored, so they take nothing from this
+                        // column: it is the logo, the songs and the buttons.
+                        let list_room =
+                            win_h - favourites::BOTTOM_RESERVED - buttons_h - list_gap - list_top;
                         let list_h = self.favourites_preferred_height().min(list_room.max(0.0));
 
                         // Scoped: the list advances the origin as it draws,
@@ -280,10 +272,6 @@ impl MenuScene {
                         });
 
                         nuon::translate().y(list_h + list_gap).add_to_current(ui);
-
-                        self.track_list_ui(ctx, ui, w);
-
-                        nuon::translate().y(tracks_h + tracks_gap).add_to_current(ui);
 
                         if neo_btn().size(w, h).label("Select File").build(ui) {
                             self.futures.push(open_midi_file_picker(&mut self.state));
@@ -351,9 +339,10 @@ impl MenuScene {
             });
         });
 
-        // Corner-anchored, and drawn last: hit testing goes to whatever was
-        // drawn on top, and the favourites list reaches across the window.
+        // Both corner-anchored rather than part of the column, and drawn last
+        // so they sit above it.
         self.performer_selector_ui(ctx, ui);
+        self.track_list_ui(ctx, ui);
     }
 }
 

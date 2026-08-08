@@ -1,13 +1,17 @@
-//! Performer controls on the main menu: who plays the song, and which of its
-//! tracks are heard and drawn.
+//! Performer controls on the main menu: how the song is performed, and which of
+//! its parts are yours.
 //!
 //! These used to be a page of their own, reached by a Tracks button, where each
-//! track carried its own Mute/Auto/Human choice. Who performs is one decision
-//! about the song, not a per-track one — the in-game toggle always treated it
-//! that way — so it is a single three-way selector now, the same one the
-//! playing scene shows, sitting where the song is picked. What is genuinely
-//! per-track is what remains beside each one: whether it is muted, and whether
-//! it is drawn in the waterfall.
+//! track carried a Mute/Auto/Human choice of its own. *How* the song is
+//! performed is one decision about the song, not a per-track one — the in-game
+//! toggle always treated it that way — so that is a single three-way selector
+//! now, the same one the playing scene shows, in the same corner.
+//!
+//! What is genuinely per-track is listed top-left, a row each: hand a part to
+//! **Auto** and the app performs it while you keep the rest (which is how you
+//! practise one hand at a time), **Mute** it to silence it, or click its colour
+//! to stop it being drawn in the waterfall. A row with neither button lit is
+//! yours to play.
 
 use midi_file::MidiTrack;
 use nuon::TextJustify;
@@ -24,16 +28,28 @@ const SEG_TOP: f32 = 10.0;
 /// One track's row.
 const ROW_H: f32 = 38.0;
 const ROW_GAP: f32 = 6.0;
-/// Rows listed, so a 16-track arrangement cannot push the menu off the screen.
-/// The rest are counted in a line underneath rather than scrolled to: a scroll
-/// container here swallows clicks on its own children, because its clip rect is
-/// only positioned correctly when built from the window origin.
+/// Rows listed, so a 16-track arrangement cannot run off the screen. The rest
+/// are counted in a line underneath rather than scrolled to — worth knowing if
+/// you add a scroll here: `Scroll::scissor_size` leaves the clip rect's origin
+/// at zero and `Layer::build` then offsets it by the current translation, so the
+/// rect only lands where you meant it to if you build from that origin.
 const MAX_ROWS: usize = 6;
 /// The "+N more" line, when a song has more tracks than that.
 const MORE_H: f32 = 18.0;
 
-const MUTE_W: f32 = 74.0;
+/// The two per-track buttons.
+const BTN_W: f32 = 60.0;
+const BTN_GAP: f32 = 4.0;
 const DOT: f32 = 22.0;
+/// Row width, and the inset of the whole list from the top-left corner. Lines
+/// up with the performer selector's inset in the opposite corner.
+/// Wide enough for the longest instrument name and its note count beside two
+/// buttons — "Acoustic Grand Piano · 1931 notes" is about as long as it gets.
+const LIST_W: f32 = 430.0;
+const LIST_MARGIN: f32 = 16.0;
+const LIST_TOP: f32 = 10.0;
+/// Caption above the rows.
+const CAPTION_H: f32 = 20.0;
 
 impl super::MenuScene {
     /// Tracks worth listing: the ones with notes in them.
@@ -44,30 +60,29 @@ impl super::MenuScene {
             .unwrap_or(0)
     }
 
-    /// Vertical room [`Self::track_list_ui`] needs, so the menu can give the
-    /// favourites list whatever is left rather than overflowing. Zero when
-    /// there is no song loaded to list.
-    pub fn track_list_height(&self) -> f32 {
-        let listed = self.listed_tracks();
-        let rows = listed.min(MAX_ROWS);
-        if rows == 0 {
-            return 0.0;
-        }
-
-        let mut h = rows as f32 * (ROW_H + ROW_GAP) - ROW_GAP;
-        if listed > MAX_ROWS {
-            h += ROW_GAP + MORE_H;
-        }
-        h
-    }
-
-    /// Draw the track rows at the current origin, `w` wide.
-    pub fn track_list_ui(&mut self, ctx: &mut Context, ui: &mut nuon::Ui, w: f32) {
+    /// The song's parts, listed in the top-left corner — out of the way of the
+    /// centred menu, and mirroring the performer selector opposite it.
+    pub fn track_list_ui(&mut self, ctx: &mut Context, ui: &mut nuon::Ui) {
         if self.listed_tracks() == 0 {
             return;
         }
 
-        self.track_rows_ui(ctx, ui, w);
+        nuon::translate()
+            .x(LIST_MARGIN)
+            .y(LIST_TOP)
+            .build(ui, |ui| {
+                nuon::label()
+                    .size(LIST_W, CAPTION_H)
+                    .text("PARTS")
+                    .text_justify(TextJustify::Left)
+                    .font_size(12.0)
+                    .color(nuon::Color::new_u8(150, 150, 150, 1.0))
+                    .build(ui);
+
+                nuon::translate()
+                    .y(CAPTION_H)
+                    .build(ui, |ui| self.track_rows_ui(ctx, ui, LIST_W));
+            });
     }
 
     /// HERO / AUTO / HUMAN, top-right — the same control the playing scene
@@ -90,7 +105,6 @@ impl super::MenuScene {
     }
 
     fn track_rows_ui(&mut self, ctx: &mut Context, ui: &mut nuon::Ui, w: f32) {
-        let mode = ctx.perform_mode;
         let listed = self.listed_tracks();
 
         // Applied after the walk: the rows borrow the song to draw themselves.
@@ -135,20 +149,28 @@ impl super::MenuScene {
             return;
         };
 
+        let player = &mut song.config.tracks[track_id].player;
+
         match ev {
             RowEvent::ToggleVisible => {
                 let config = &mut song.config.tracks[track_id];
                 config.visible = !config.visible;
             }
-            RowEvent::ToggleMute => {
-                if song.config.tracks[track_id].player == PlayerConfig::Mute {
-                    // Back in: which of Auto or Human it lands on is the
-                    // performer mode's call, not this button's.
-                    song.config.tracks[track_id].player = PlayerConfig::Auto;
-                    song.set_mode(mode);
+            // Both buttons toggle back to "mine", so one click hands a part
+            // over and another takes it back.
+            RowEvent::ToggleAuto => {
+                *player = if *player == PlayerConfig::Auto {
+                    PlayerConfig::Human
                 } else {
-                    song.config.tracks[track_id].player = PlayerConfig::Mute;
-                }
+                    PlayerConfig::Auto
+                };
+            }
+            RowEvent::ToggleMute => {
+                *player = if *player == PlayerConfig::Mute {
+                    PlayerConfig::Human
+                } else {
+                    PlayerConfig::Mute
+                };
             }
         }
     }
@@ -156,11 +178,14 @@ impl super::MenuScene {
 
 enum RowEvent {
     ToggleVisible,
+    ToggleAuto,
     ToggleMute,
 }
 
-/// One track: a coloured dot that shows and toggles whether the track is drawn,
-/// its name and note count, and a Mute button.
+/// One track: a coloured dot that shows and toggles whether it is drawn, its
+/// instrument and note count (the note count being how you tell two tracks of
+/// the same instrument apart — left hand from right), and the Auto and Mute
+/// buttons. Neither lit means the part is the player's.
 fn track_row(
     ctx: &Context,
     ui: &mut nuon::Ui,
@@ -170,6 +195,7 @@ fn track_row(
     config: &TrackConfig,
 ) -> Option<RowEvent> {
     let muted = config.player == PlayerConfig::Mute;
+    let auto = config.player == PlayerConfig::Auto;
 
     let track_color = if !config.visible {
         nuon::Color::new_u8(102, 102, 102, 1.0)
@@ -220,39 +246,71 @@ fn track_row(
         res = Some(RowEvent::ToggleVisible);
     }
 
-    let label_x = pad + DOT + 10.0;
+    let buttons_w = BTN_W * 2.0 + BTN_GAP;
+    let label_x = pad + DOT + 8.0;
     nuon::label()
         .pos(label_x, 0.0)
-        .size(w - label_x - MUTE_W - pad * 2.0, ROW_H)
-        .text(format!("{title}  ·  {} notes", track.notes.len()))
+        .size((w - label_x - buttons_w - pad * 2.0).max(0.0), ROW_H)
+        .text(format!("{title} · {} notes", track.notes.len()))
         .text_justify(TextJustify::Left)
-        .font_size(14.0)
+        .font_size(13.0)
         .color(if muted {
-            nuon::Color::new_u8(130, 130, 130, 1.0)
+            nuon::Color::new_u8(120, 120, 120, 1.0)
         } else {
             nuon::Color::new_u8(235, 235, 235, 1.0)
         })
         .build(ui);
 
-    let mute_h = ROW_H - 10.0;
+    let btn_h = ROW_H - 10.0;
+    let btn_y = (ROW_H - btn_h) / 2.0;
+    let buttons_x = w - buttons_w - pad;
+
+    // Off = a plain slot, on = the state is doing something, so it lights up.
+    let idle = nuon::Color::new_u8(58, 54, 68, 1.0);
+    let idle_hover = nuon::Color::new_u8(78, 73, 92, 1.0);
+
+    if nuon::button()
+        .id(nuon::Id::hash_with(|h| {
+            "track_auto".hash(h);
+            row.hash(h);
+        }))
+        .pos(buttons_x, btn_y)
+        .size(BTN_W, btn_h)
+        .color(if auto {
+            nuon::Color::new_u8(70, 110, 190, 1.0)
+        } else {
+            idle
+        })
+        .hover_color(if auto {
+            nuon::Color::new_u8(90, 133, 220, 1.0)
+        } else {
+            idle_hover
+        })
+        .border_radius([6.0, 0.0, 0.0, 6.0])
+        .label("Auto")
+        .build(ui)
+    {
+        res = Some(RowEvent::ToggleAuto);
+    }
+
     if nuon::button()
         .id(nuon::Id::hash_with(|h| {
             "track_mute".hash(h);
             row.hash(h);
         }))
-        .pos(w - MUTE_W - pad, (ROW_H - mute_h) / 2.0)
-        .size(MUTE_W, mute_h)
+        .pos(buttons_x + BTN_W + BTN_GAP, btn_y)
+        .size(BTN_W, btn_h)
         .color(if muted {
             nuon::Color::new_u8(150, 60, 60, 1.0)
         } else {
-            nuon::Color::new_u8(74, 68, 88, 1.0)
+            idle
         })
         .hover_color(if muted {
             nuon::Color::new_u8(175, 75, 75, 1.0)
         } else {
-            nuon::Color::new_u8(87, 81, 101, 1.0)
+            idle_hover
         })
-        .border_radius([6.0; 4])
+        .border_radius([0.0, 6.0, 6.0, 0.0])
         .label("Mute")
         .build(ui)
     {

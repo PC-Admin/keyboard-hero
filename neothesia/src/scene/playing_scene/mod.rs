@@ -821,7 +821,7 @@ impl PlayingScene {
         // Human track) must keep rolling — its targets are graded against a
         // moving song and expire as misses, so freezing on them would
         // deadlock playback on the first note nobody played.
-        let waiting = self.player.has_human_track()
+        let waiting = self.player.waits_for_player()
             && !self.player.play_along().are_required_keys_pressed();
 
         if !waiting {
