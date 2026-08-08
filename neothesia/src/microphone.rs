@@ -16,9 +16,14 @@
 //! something waiting, and the [`MAX_FILL`] ceiling stops a fast microphone
 //! quietly growing the delay between singing and hearing yourself.
 //!
-//! There is deliberately no gain control here: the mics this was written for
-//! have a hardware dial, and a second one in software is only a way to get the
-//! level wrong twice.
+//! The microphone's own dial sets how much signal arrives, as it should. What
+//! it cannot do is make that signal loud enough to sing over a piano: a voice
+//! reaches a USB mic at a level tens of decibels below where the synth runs,
+//! and passed on untouched it is technically playing and practically inaudible
+//! — you hear yourself in the room far louder than a copy that quiet. So there
+//! is one fixed [`MAKEUP_GAIN`] stage on the way through, and a limiter after
+//! it so that a shout flattens instead of squaring off into a crunch. Not a
+//! volume control: nothing to set, and the dial still decides what goes in.
 
 use std::sync::{
     Arc,
@@ -49,6 +54,26 @@ const MAX_FILL: usize = 2048;
 /// Ring capacity. A power of two so the wrap is a mask, and comfortably above
 /// [`MAX_FILL`], which is what actually bounds the fill.
 const RING_CAPACITY: usize = 8192;
+
+/// How much louder the microphone is made on its way through.
+///
+/// Measured rather than guessed. Speaking into a USB mic whose capture gain is
+/// already at maximum lands around -34 dBFS on average, with peaks some twenty
+/// decibels above that; the synth and the sound effects sit far higher. Six
+/// times over puts an ordinary voice in the same range as the piano it is meant
+/// to sing along with. Change this one number to taste — louder is a bigger
+/// figure, and the limiter below keeps the top end civil either way.
+const MAKEUP_GAIN: f32 = 6.0;
+
+/// Where the limiter starts to bend the signal.
+///
+/// Below this, samples pass through untouched, so normal singing is exactly
+/// what the microphone heard. Above it the curve flattens off towards full
+/// scale and never crosses it, which is what turns a shout into a loud shout
+/// rather than the crunch of a squared-off waveform. Chosen to meet the
+/// straight part with the same slope, so there is no audible corner where the
+/// two join.
+const LIMIT_KNEE: f32 = 0.7;
 
 /// How much of the level reading survives each callback, so a peak falls back
 /// visibly instead of sticking at the loudest thing that ever happened. Around
@@ -114,11 +139,48 @@ impl Ring {
     }
 }
 
-/// The streams, alive for exactly as long as passthrough is on: dropping them
-/// closes both devices, which is all "off" means. The host outlives them for
-/// the same reason the synth keeps hold of its own.
-struct Live {
+/// The audio host and the two devices, found once and then kept for the life of
+/// the app — the same thing `SynthBackend` does with its own.
+///
+/// Not rebuilt per toggle, and that matters: cpal's ALSA host keeps a
+/// process-wide context that tears down ALSA's global configuration when the
+/// last one goes, so a host created and dropped around every switch-on left the
+/// second one with a playback stream that reported success, appeared in the
+/// audio graph, and carried nothing. Finding the devices once takes that whole
+/// question off the table.
+///
+/// Holding them does not pin a particular microphone: these name the system
+/// default, and which hardware that is gets resolved when a stream is opened,
+/// so each switch-on still picks up whatever the default is by then.
+struct Devices {
     _host: cpal::Host,
+    capture: cpal::Device,
+    playback: cpal::Device,
+}
+
+impl Devices {
+    fn open() -> Result<Self, String> {
+        let host = cpal::default_host();
+
+        let capture = host
+            .default_input_device()
+            .ok_or_else(|| "no input device".to_string())?;
+        let playback = host
+            .default_output_device()
+            .ok_or_else(|| "no output device".to_string())?;
+
+        Ok(Self {
+            _host: host,
+            capture,
+            playback,
+        })
+    }
+}
+
+/// The streams, alive for exactly as long as passthrough is on: dropping them
+/// closes both, which is all "off" means — the microphone is released rather
+/// than held open in the background.
+struct Live {
     _capture: cpal::Stream,
     _playback: cpal::Stream,
     /// The loudest thing the microphone has sent lately, as f32 bits: written
@@ -131,6 +193,9 @@ struct Live {
 /// player has forgotten about.
 #[derive(Default)]
 pub struct MicPassthrough {
+    /// Found on the first switch-on and kept from then on, however many times
+    /// it is toggled after that. See [`Devices`].
+    devices: Option<Devices>,
     live: Option<Live>,
     /// Why the last attempt to switch it on failed, so the menu can say so
     /// rather than looking like the click did nothing.
@@ -147,14 +212,14 @@ impl MicPassthrough {
         self.error.as_deref()
     }
 
-    /// The peak the microphone is delivering, 0 to 1, decaying between peaks.
+    /// The peak going out to the speakers, 0 to 1, decaying between peaks.
     /// Zero while it is off.
     ///
-    /// Worth showing, because there is nothing in this module that can make a
-    /// microphone louder: it passes on exactly what it is given, so a gain dial
-    /// left at the bottom is silence all the way through and looks identical to
-    /// a bug from the outside. A number that moves when you speak is the
-    /// difference between the two.
+    /// Worth showing because a passthrough that is working and a passthrough
+    /// that is silent look identical from the outside — the only difference is
+    /// a sound you may well be talking over. Read after the gain and the
+    /// limiter, so a bar that moves means audio is leaving the app, and a bar
+    /// against the top means the limiter is holding a shout back.
     pub fn level(&self) -> f32 {
         self.live
             .as_ref()
@@ -171,7 +236,20 @@ impl MicPassthrough {
     }
 
     fn start(&mut self) {
-        match open() {
+        if self.devices.is_none() {
+            match Devices::open() {
+                Ok(devices) => self.devices = Some(devices),
+                Err(err) => {
+                    log::warn!("microphone passthrough unavailable: {err}");
+                    self.error = Some(err);
+                    return;
+                }
+            }
+        }
+
+        let devices = self.devices.as_ref().expect("just opened above");
+
+        match open_streams(devices) {
             Ok(live) => {
                 self.live = Some(live);
                 self.error = None;
@@ -189,16 +267,10 @@ impl MicPassthrough {
     }
 }
 
-/// Open both devices and start moving samples between them.
-fn open() -> Result<Live, String> {
-    let host = cpal::default_host();
-
-    let capture_device = host
-        .default_input_device()
-        .ok_or_else(|| "no input device".to_string())?;
-    let playback_device = host
-        .default_output_device()
-        .ok_or_else(|| "no output device".to_string())?;
+/// Open a stream on each device and start moving samples between them.
+fn open_streams(devices: &Devices) -> Result<Live, String> {
+    let capture_device = &devices.capture;
+    let playback_device = &devices.playback;
 
     let capture_supported = capture_device
         .default_input_config()
@@ -231,7 +303,7 @@ fn open() -> Result<Live, String> {
     let level = Arc::new(AtomicU32::new(0));
 
     let capture = capture_stream(
-        &capture_device,
+        capture_device,
         capture_config,
         capture_format,
         Arc::clone(&ring),
@@ -241,7 +313,7 @@ fn open() -> Result<Live, String> {
     )
     .map_err(|err| format!("microphone: {err}"))?;
 
-    let playback = playback_stream(&playback_device, playback_config, playback_format, ring)
+    let playback = playback_stream(playback_device, playback_config, playback_format, ring)
         .map_err(|err| format!("speakers: {err}"))?;
 
     // Capture first, so the ring is already filling by the time playback looks.
@@ -249,7 +321,6 @@ fn open() -> Result<Live, String> {
     playback.play().map_err(|err| format!("speakers: {err}"))?;
 
     Ok(Live {
-        _host: host,
         _capture: capture,
         _playback: playback,
         level,
@@ -331,6 +402,12 @@ where
                 let sample = frame.iter().map(|s| f32::from_sample(*s)).sum::<f32>()
                     / frame.len().max(1) as f32;
 
+                // Brought up to a level you can actually hear, then held under
+                // full scale. The meter reads from here, after both, so the bar
+                // is what comes out of the speakers rather than what went into
+                // the microphone.
+                let sample = limit(sample * MAKEUP_GAIN);
+
                 peak = peak.max(sample.abs());
                 resampler.feed(sample, |sample| ring.push(sample));
             }
@@ -343,6 +420,23 @@ where
         |err| log::warn!("microphone capture: {err}"),
         None,
     )
+}
+
+/// Holds a sample under full scale without a hard edge.
+///
+/// Straight through below [`LIMIT_KNEE`], and beyond it the remaining headroom
+/// is spent asymptotically, so however loud the input gets the output only
+/// approaches 1.0. The two halves meet with a matching slope, which is what
+/// keeps the transition inaudible: a hard clip here would be heard as
+/// distortion on exactly the notes a singer leans into.
+fn limit(sample: f32) -> f32 {
+    let magnitude = sample.abs();
+    if magnitude <= LIMIT_KNEE {
+        return sample;
+    }
+
+    let headroom = 1.0 - LIMIT_KNEE;
+    sample.signum() * (LIMIT_KNEE + headroom * ((magnitude - LIMIT_KNEE) / headroom).tanh())
 }
 
 /// Turns samples arriving at the capture device's rate into samples at the
@@ -516,6 +610,52 @@ mod tests {
             "a rising ramp came out unsorted"
         );
         assert!(out.iter().all(|sample| (0.0..44_100.0).contains(sample)));
+    }
+
+    #[test]
+    fn the_limiter_leaves_ordinary_singing_alone() {
+        for sample in [0.0, 0.1, -0.25, 0.5, LIMIT_KNEE, -LIMIT_KNEE] {
+            assert_eq!(limit(sample), sample, "{sample} should pass untouched");
+        }
+    }
+
+    #[test]
+    fn the_limiter_never_lets_anything_past_full_scale() {
+        // However hard it is driven, and symmetrically, so the waveform is not
+        // bent out of shape in one direction only. Full scale itself is fine —
+        // the curve approaches it and, once the ratio is large enough for the
+        // tangent to round to one, sits exactly on it. What must never happen
+        // is going past, which is what wraps round into a crack.
+        for sample in [0.8, 1.0, 2.0, 50.0, 1e6] {
+            assert!(limit(sample) <= 1.0, "{sample} escaped");
+            assert!(limit(sample) > LIMIT_KNEE, "{sample} was crushed");
+            assert_eq!(limit(-sample), -limit(sample));
+        }
+    }
+
+    #[test]
+    fn the_limiter_has_no_corner_where_it_takes_over() {
+        // A step at the knee would be heard as distortion the moment a singer
+        // leans in, so check the two halves meet and keep the same slope.
+        let step = 1e-4;
+        let below = (limit(LIMIT_KNEE) - limit(LIMIT_KNEE - step)) / step;
+        let above = (limit(LIMIT_KNEE + step) - limit(LIMIT_KNEE)) / step;
+        assert!(
+            (below - above).abs() < 0.01,
+            "slope jumped: {below} -> {above}"
+        );
+    }
+
+    #[test]
+    fn a_speaking_voice_ends_up_somewhere_you_can_hear_it() {
+        // The measured article: peaks around -15 dBFS off the microphone, which
+        // is a healthy input level and still far below the synth. After the
+        // makeup stage it should sit near the top of the range without the
+        // limiter having to crush it.
+        let measured_peak = 10f32.powf(-15.0 / 20.0);
+        let out = limit(measured_peak * MAKEUP_GAIN);
+        assert!(out > 0.7, "still too quiet to hear: {out}");
+        assert!(out < 1.0, "past full scale: {out}");
     }
 
     #[test]

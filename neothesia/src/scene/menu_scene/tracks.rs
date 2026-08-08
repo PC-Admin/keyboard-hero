@@ -64,10 +64,10 @@ const STATUS_W: f32 = 90.0;
 /// The level meter beside it.
 const METER_W: f32 = 90.0;
 const METER_H: f32 = 6.0;
-/// Quietest level the meter draws anything for. Below roughly this a microphone
-/// is sending its own noise and nothing else, so an empty bar is the honest
-/// reading — and the scale is in decibels because that is the range a gain dial
-/// moves through, and a linear bar would sit flat across most of its travel.
+/// Quietest level the meter draws anything for. Below roughly this there is
+/// nothing to hear anyway, so an empty bar is the honest reading — and the
+/// scale is in decibels because that is how loudness is heard, and a linear bar
+/// would sit flat across most of its travel.
 const METER_FLOOR_DB: f32 = -60.0;
 
 impl super::MenuScene {
@@ -313,7 +313,8 @@ fn mic_row(ctx: &Context, ui: &mut nuon::Ui, w: f32) -> bool {
                 .pos(meter_x, meter_y)
                 .size(METER_W * fill, METER_H)
                 .color(if fill > 0.98 {
-                    // Against the ceiling, where a voice starts to square off.
+                    // Against the ceiling: the limiter is holding it back, so
+                    // turn the microphone's own dial down a little.
                     nuon::Color::new_u8(220, 110, 90, 1.0)
                 } else {
                     nuon::Color::new_u8(80, 200, 120, 1.0)
