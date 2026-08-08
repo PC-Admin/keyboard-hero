@@ -180,6 +180,7 @@ impl PlayingScene {
             song,
             keyboard_layout.range.clone(),
             ctx.config.separate_channels(),
+            ctx.perform_mode,
         );
         waterfall.update(player.time_without_lead_in());
 
@@ -325,7 +326,61 @@ impl PlayingScene {
             }
         }
 
+        // Thunder for a bolt that landed while those hits were judged.
+        if self.effects.take_strike() {
+            self.sfx.lightning();
+        }
+
         self.effects.update(dt, hit_line_y, pos.x, board_width);
+    }
+
+    /// Electric wash while a lightning strike's surge holds: the keyboard, the
+    /// hit line and every falling bar on screen light up. Drawn under the
+    /// particles and the bolt itself, which stay the brightest things around.
+    fn render_surge(&mut self, ctx: &Context, time: f32) {
+        let pos = *self.keyboard.pos();
+        let board_width = self.keyboard.layout().width;
+
+        self.effects.render_surge_glow(
+            &mut self.quad_renderer_fg,
+            pos.y,
+            pos.x,
+            board_width,
+            ctx.window_state.logical_size.width,
+            ctx.window_state.logical_size.height,
+        );
+
+        if !self.effects.surging() {
+            return;
+        }
+
+        // Only bars anywhere near the lane are worth a glow quad; the rest of
+        // the song is minutes away in either direction.
+        let range_start = self.keyboard.range().start();
+        let keys = &self.keyboard.layout().keys;
+        let bars = self
+            .waterfall
+            .notes()
+            .iter()
+            .filter(|n| n.channel != 9)
+            .filter(|n| n.end.as_secs_f32() > time - 0.5 && n.start.as_secs_f32() < time + 20.0)
+            .filter_map(|n| {
+                let key = keys.get(n.note.wrapping_sub(range_start) as usize)?;
+                Some((
+                    pos.x + key.x(),
+                    key.width() - 1.0,
+                    n.start.as_secs_f32(),
+                    n.duration.as_secs_f32(),
+                ))
+            });
+
+        self.effects.render_surge_notes(
+            &mut self.quad_renderer_fg,
+            bars,
+            time,
+            ctx.config.animation_speed() / ctx.window_state.scale_factor as f32,
+            pos.y,
+        );
     }
 
     /// Guitar-Hero HUD: top-left streak counter + audience sentiment, rising
@@ -444,7 +499,7 @@ impl PlayingScene {
         }
     }
 
-    fn update_hud(&mut self, ctx: &Context, delta: Duration) {
+    fn update_hud(&mut self, ctx: &mut Context, delta: Duration) {
         if self.finished {
             self.results_overlay_ui(ctx);
             return;
@@ -464,49 +519,30 @@ impl PlayingScene {
         // itself, jam over the top), HUMAN (song waits). Tallies keep
         // running across switches.
         {
-            use midi_player::PerformMode;
-
             let win_w = ctx.window_state.logical_size.width;
-            let mode = self.player.mode();
 
-            let (w, h, gap) = (64.0, 32.0, 2.0);
-            let x0 = win_w - (w * 3.0 + gap * 2.0) - 16.0;
-
-            let segments = [
-                (PerformMode::Hero, "HERO", [8.0, 0.0, 0.0, 8.0]),
-                (PerformMode::Auto, "AUTO", [0.0; 4]),
-                (PerformMode::Human, "HUMAN", [0.0, 8.0, 8.0, 0.0]),
-            ];
-
-            for (i, (seg_mode, label, radius)) in segments.into_iter().enumerate() {
-                let active = mode == seg_mode;
-                let color = if active {
-                    nuon::Color::new_u8(160, 81, 238, 1.0)
-                } else {
-                    nuon::Color::new_u8(50, 50, 60, 0.9)
-                };
-
-                if nuon::button()
-                    .id(label)
-                    .pos(x0 + i as f32 * (w + gap), hud_top + 10.0)
-                    .size(w, h)
-                    .color(color)
-                    .border_radius(radius)
-                    .label(label)
-                    .build(&mut self.nuon)
-                    && !active
-                {
-                    self.player.set_mode(seg_mode);
-                    // Snap the marquee back to its starting point: a switch
-                    // you can see even when the music does not change much.
-                    self.title_scroll = 0.0;
-                }
+            if let Some(mode) = super::performer_selector(
+                &mut self.nuon,
+                win_w,
+                hud_top + 10.0,
+                self.player.mode(),
+            ) {
+                self.player.set_mode(mode);
+                // Remembered for the session, so leaving the song — to replay
+                // it or to pick another — comes back to the mode the player
+                // asked for rather than the song's default.
+                ctx.perform_mode = mode;
+                // Snap the marquee back to its starting point: a switch you
+                // can see even when the music does not change much.
+                self.title_scroll = 0.0;
             }
 
             // --- song title, tucked under the selector --------------------
+            // Measured off the selector, so the two stay aligned.
+            let x0 = super::performer_selector_x(win_w);
             let band_y = hud_top + 46.0;
             let band_h = TITLE_FONT_SIZE + 6.0;
-            let band_w = w * 3.0 + gap * 2.0;
+            let band_w = super::PERFORMER_SELECTOR_W;
 
             let has_title = !self.title.is_empty() && self.title_width > 0.0;
 
@@ -615,15 +651,58 @@ impl PlayingScene {
                 .size(160.0, 12.0)
                 .build(&mut self.nuon);
 
+            // Score readout. Nothing but its colour marks the surge: it turns
+            // electric blue for as long as notes are worth half again as much,
+            // and the keyboard behind it is already saying the rest.
+            let surging = self.effects.surging();
+            const SCORE_SIZE: f32 = 14.0;
+            let score_y = hud_top + 86.0;
+
             nuon::label()
                 .text(format!("SCORE {}", effects::thousands(self.effects.score())))
-                .font_size(14.0)
-                .color(nuon::Color::new_u8(255, 222, 84, 1.0))
+                .font_size(SCORE_SIZE)
+                .color(if surging {
+                    nuon::Color::new_u8(105, 195, 255, 1.0)
+                } else {
+                    nuon::Color::new_u8(255, 222, 84, 1.0)
+                })
                 .bold(true)
                 .text_justify(nuon::TextJustify::Left)
-                .pos(16.0, hud_top + 86.0)
-                .size(220.0, 14.0)
+                .pos(16.0, score_y)
+                .size(220.0, SCORE_SIZE)
                 .build(&mut self.nuon);
+
+            // Charge pips for the next bolt, in the slot below the score. Only
+            // while it is being built — during a surge there is nothing to
+            // charge, and the blue score says so.
+            if !surging && self.effects.perfect_chords() > 0 {
+                let row_y = score_y + SCORE_SIZE + 6.0;
+                let pips_w =
+                    self.effects
+                        .render_bolt_charge(&mut self.quad_renderer_fg, 16.0, row_y + 6.0);
+
+                // A full chain still waits on a maxed-out crowd, so say so —
+                // full pips and no bolt would otherwise look broken.
+                let chain_full = self.effects.perfect_chords() >= effects::BOLT_CHORDS;
+                let text = if chain_full && !self.effects.crowd_maxed() {
+                    "CHAIN READY · WIN THE CROWD".to_string()
+                } else {
+                    format!(
+                        "PERFECT CHAIN {}/{}",
+                        self.effects.perfect_chords(),
+                        effects::BOLT_CHORDS
+                    )
+                };
+
+                nuon::label()
+                    .text(text)
+                    .font_size(12.0)
+                    .color(nuon::Color::new_u8(150, 200, 230, 1.0))
+                    .text_justify(nuon::TextJustify::Left)
+                    .pos(16.0 + pips_w + 8.0, row_y)
+                    .size(240.0, 12.0)
+                    .build(&mut self.nuon);
+            }
 
             // The audience weighs in: a drawn face + speedometer-style dial.
             if let Some(level) = self.effects.sentiment_level() {
@@ -742,7 +821,7 @@ impl PlayingScene {
         // Human track) must keep rolling — its targets are graded against a
         // moving song and expire as misses, so freezing on them would
         // deadlock playback on the first note nobody played.
-        let waiting = self.player.has_human_track()
+        let waiting = self.player.waits_for_player()
             && !self.player.play_along().are_required_keys_pressed();
 
         if !waiting {
@@ -848,6 +927,7 @@ impl Scene for PlayingScene {
             }
         }
 
+        self.render_surge(ctx, time);
         self.effects.render(&mut self.quad_renderer_fg);
         self.effects.render_note_flashes(
             &mut self.quad_renderer_fg,
@@ -855,6 +935,7 @@ impl Scene for PlayingScene {
             ctx.config.animation_speed() / ctx.window_state.scale_factor as f32,
             self.keyboard.pos().y,
         );
+        self.effects.render_bolts(&mut self.quad_renderer_fg);
         self.update_hud(ctx, delta);
 
         TopBar::update(self, ctx);

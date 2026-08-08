@@ -4,24 +4,12 @@ use crate::{
     output_manager::OutputConnection,
     song::{PlayerConfig, Song},
 };
+pub use crate::song::PerformMode;
 use neothesia_core::piano_layout;
 use std::{
     collections::{HashMap, HashSet},
     time::{Duration, Instant},
 };
-
-/// Who performs the song, cycled by the in-game toggle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PerformMode {
-    /// The song rolls but its target notes stay *silent* — the player
-    /// supplies them, Guitar-Hero style. Graded like Auto.
-    Hero,
-    /// The song plays itself audibly; the player may jam over the top and
-    /// is graded on whatever they play. Never stalls.
-    Auto,
-    /// Classic play-along: the song stalls and waits for the player.
-    Human,
-}
 
 pub struct MidiPlayer {
     playback: midi_file::PlaybackState,
@@ -29,8 +17,10 @@ pub struct MidiPlayer {
     song: Song,
     play_along: PlayAlong,
     separate_channels: bool,
-    /// HERO mode latch: only meaningful while no track is Human.
-    hero: bool,
+    /// How the player's parts are performed. Stored, not inferred: every mode
+    /// can have parts assigned to the player now, so the track config alone no
+    /// longer says which mode this is.
+    mode: PerformMode,
 }
 
 impl MidiPlayer {
@@ -39,6 +29,7 @@ impl MidiPlayer {
         song: Song,
         user_keyboard_range: piano_layout::KeyboardRange,
         separate_channels: bool,
+        mode: PerformMode,
     ) -> Self {
         Self::new_with_lead_in(
             output,
@@ -46,6 +37,7 @@ impl MidiPlayer {
             user_keyboard_range,
             separate_channels,
             Duration::from_secs(3),
+            mode,
         )
     }
 
@@ -55,6 +47,7 @@ impl MidiPlayer {
         user_keyboard_range: piano_layout::KeyboardRange,
         separate_channels: bool,
         lead_in: Duration,
+        mode: PerformMode,
     ) -> Self {
         let mut player = Self {
             playback: midi_file::PlaybackState::new(lead_in, song.file.tracks.clone()),
@@ -62,7 +55,7 @@ impl MidiPlayer {
             play_along: PlayAlong::new(user_keyboard_range),
             song,
             separate_channels,
-            hero: false,
+            mode,
         };
         // Let's reset programs,
         // for timestamp 0 most likely all programs will be 0, so this should clean any leftovers
@@ -81,10 +74,10 @@ impl MidiPlayer {
     ///
     /// When paused: returns None
     pub fn update(&mut self, delta: Duration) -> Vec<&midi_file::MidiEvent> {
-        // No-wait jam mode (no Human track): the song never stalls, so
-        // targets nobody played must expire as silent misses rather than
-        // pile up. In wait mode they persist — the song is waiting on them.
-        let jam_mode = !self.has_human_track();
+        // The jam modes never stall, so targets nobody played must expire as
+        // silent misses rather than pile up. Wait mode keeps them — the song is
+        // waiting on them.
+        let jam_mode = !self.waits_for_player();
         self.play_along.update(jam_mode);
 
         let events = self.playback.update(delta);
@@ -98,43 +91,34 @@ impl MidiPlayer {
                 event.channel
             };
             match config.player {
+                // Not the player's part: the app performs it, audibly.
                 PlayerConfig::Auto => {
-                    // Jam modes (AUTO and HERO): the song's playable notes
-                    // become targets, so whatever the user plays on top is
-                    // graded for real — matched notes fire the effects,
-                    // unplayed ones expire as silent misses. Channel 9 is
-                    // percussion (drum hits, not keys), and notes off the
-                    // keyboard can't be played, so neither becomes a target.
-                    let note_key = match event.message {
-                        MidiMessage::NoteOn { key, .. } | MidiMessage::NoteOff { key, .. } => {
-                            Some(key.as_int())
-                        }
-                        _ => None,
-                    };
-                    let is_target = jam_mode
-                        && event.channel != 9
-                        && note_key.is_some_and(|k| self.play_along.covers(k));
+                    self.output // TODO: Send to multiple outputs
+                        .midi_event(u4::new(channel), event.message);
 
-                    // HERO mode: target notes stay silent — that part is the
-                    // player's to perform. Everything else still sounds.
-                    if !(self.hero && is_target) {
-                        self.output // TODO: Send to multiple outputs
-                            .midi_event(u4::new(channel), event.message);
-                    }
-
-                    if is_target {
+                    // AUTO claims no parts at all, so there would be nothing to
+                    // grade — instead the song's own notes become targets and
+                    // whatever the player adds over the top is graded for real.
+                    if self.mode == PerformMode::Auto
+                        && is_players_note(event.channel, &event.message, &self.play_along)
+                    {
                         self.play_along
                             .midi_event(MidiEventSource::File, &event.message);
                     }
                 }
+                // The player's part. Notes they can actually reach are theirs to
+                // play, so those become targets rather than something the synth
+                // sounds — which is both what HUMAN waits on and what HERO
+                // leaves silent. Everything else on the track still goes out:
+                // controllers, so it sounds as intended when they do play it,
+                // and any note beyond their reach, which would otherwise vanish
+                // from the song — and, worse, leave wait mode stalled forever on
+                // a key nobody can press.
                 PlayerConfig::Human => {
-                    self.play_along
-                        .midi_event(MidiEventSource::File, &event.message);
-
-                    // In Human mode note events from the file are targets for the player,
-                    // not notes to be played by the synthesizer. Keep forwarding controller
-                    // and other non-note events so the track still sounds as intended.
-                    if should_forward_human_event(&event.message) {
+                    if is_players_note(event.channel, &event.message, &self.play_along) {
+                        self.play_along
+                            .midi_event(MidiEventSource::File, &event.message);
+                    } else {
                         self.output.midi_event(u4::new(channel), event.message);
                     }
                 }
@@ -270,56 +254,30 @@ impl MidiPlayer {
     }
 
     pub fn mode(&self) -> PerformMode {
-        if self.has_human_track() {
-            PerformMode::Human
-        } else if self.hero {
-            PerformMode::Hero
-        } else {
-            PerformMode::Auto
-        }
+        self.mode
     }
 
-    /// Switch who performs, mid-song. HUMAN re-assigns the first melodic
-    /// non-drum track (the same one the song-setup default picks); the jam
-    /// modes set every Human track back to Auto, with HERO also muting the
-    /// target notes. Ringing notes are silenced and pending targets dropped,
-    /// so a stalled song resumes on the spot instead of waiting for keys
-    /// that are no longer anyone's job.
+    /// Does the song stall on the player's parts? Only classic play-along does;
+    /// the jam modes roll on and let unplayed targets expire.
+    pub fn waits_for_player(&self) -> bool {
+        self.mode == PerformMode::Human
+    }
+
+    /// Switch who performs, mid-song. The track re-assignment is the same one
+    /// the menu's selector makes, so both routes land a song in the same state;
+    /// HERO differs from AUTO only in the latch, which mutes the target notes.
+    /// Ringing notes are silenced and pending targets dropped, so a stalled
+    /// song resumes on the spot instead of waiting for keys that are no longer
+    /// anyone's job.
     pub fn set_mode(&mut self, mode: PerformMode) {
-        if mode == self.mode() {
+        if mode == self.mode {
             return;
         }
 
         self.clear();
         self.play_along.clear();
-        self.hero = mode == PerformMode::Hero;
-
-        if mode == PerformMode::Human {
-            let mut assigned = false;
-            for (i, track) in self.song.file.tracks.iter().enumerate() {
-                let is_drums = track.has_drums && !track.has_other_than_drums;
-                if !assigned && !is_drums && !track.notes.is_empty() {
-                    self.song.config.tracks[i].player = PlayerConfig::Human;
-                    assigned = true;
-                }
-            }
-        } else {
-            for track in self.song.config.tracks.iter_mut() {
-                if matches!(track.player, PlayerConfig::Human) {
-                    track.player = PlayerConfig::Auto;
-                }
-            }
-        }
-    }
-
-    /// True when at least one track is set to Human, i.e. play-along scoring
-    /// is meaningful.
-    pub fn has_human_track(&self) -> bool {
-        self.song
-            .config
-            .tracks
-            .iter()
-            .any(|t| matches!(t.player, PlayerConfig::Human))
+        self.mode = mode;
+        self.song.set_mode(mode);
     }
 
     pub fn user_midi_event(&mut self, channel: u8, message: &MidiMessage) {
@@ -344,11 +302,17 @@ pub enum MidiEventSource {
 /// slightly is playing, not flailing.
 const MATCH_LEEWAY: Duration = Duration::from_millis(700);
 
-fn should_forward_human_event(message: &MidiMessage) -> bool {
-    !matches!(
-        message,
-        MidiMessage::NoteOn { .. } | MidiMessage::NoteOff { .. }
-    )
+/// Is this event a note on the player's own part that they could actually
+/// strike? Drum hits are not keys, and a note off the end of their keyboard
+/// cannot be reached however willing they are — neither is theirs to play, so
+/// neither may be taken off the synth or set as a target.
+fn is_players_note(channel: u8, message: &MidiMessage, play_along: &PlayAlong) -> bool {
+    let key = match message {
+        MidiMessage::NoteOn { key, .. } | MidiMessage::NoteOff { key, .. } => key.as_int(),
+        _ => return false,
+    };
+
+    channel != 9 && play_along.covers(key)
 }
 
 type NoteId = u8;
@@ -606,6 +570,30 @@ mod tests {
             key: key.into(),
             vel: 90.into(),
         }
+    }
+
+    /// Only notes the player could actually strike are theirs. Losing this is
+    /// what once made a claimed track drop every note beyond the end of the
+    /// keyboard — silent in the song, and set as a target nobody could hit.
+    #[test]
+    fn a_note_out_of_reach_is_not_the_players() {
+        // A 61-key board: middle C is on it, the bottom of an 88 is not.
+        let pa = PlayAlong::new(piano_layout::KeyboardRange::new(36..=96));
+
+        assert!(is_players_note(0, &note_on(60), &pa));
+
+        assert!(
+            !is_players_note(0, &note_on(21), &pa),
+            "below the keyboard: the synth must still sound it"
+        );
+        assert!(
+            !is_players_note(9, &note_on(60), &pa),
+            "channel 9 is a drum hit, not a key"
+        );
+        assert!(
+            !is_players_note(0, &MidiMessage::ProgramChange { program: 1.into() }, &pa),
+            "not a note at all"
+        );
     }
 
     /// Jam mode: a target the user matches while it is still live is a Good

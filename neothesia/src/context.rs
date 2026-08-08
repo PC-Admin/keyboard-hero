@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::{
     NeothesiaEvent, TransformUniform, config::Config, input_manager::InputManager,
-    output_manager::OutputManager, utils::window::WindowState,
+    output_manager::OutputManager, song::PerformMode, utils::window::WindowState,
 };
 use neothesia_core::render::{QuadRendererFactory, TextRendererFactory};
 use wgpu_jumpstart::{Gpu, Uniform};
@@ -25,6 +25,12 @@ pub struct Context {
     pub config: Config,
 
     pub proxy: EventLoopProxy<NeothesiaEvent>,
+
+    /// Performer mode the player last chose, so it survives leaving a song:
+    /// every new song is loaded to be performed this way, and both the menu
+    /// selector and the in-game one write back here. Session-lived — a fresh
+    /// launch starts on HERO again.
+    pub perform_mode: PerformMode,
 
     /// Last frame timestamp
     pub frame_timestamp: std::time::Instant,
@@ -70,6 +76,8 @@ impl Context {
             input_manager: InputManager::new(proxy.clone()),
             config,
             proxy,
+            // The game the app is named for, out of the box.
+            perform_mode: PerformMode::Hero,
             frame_timestamp: std::time::Instant::now(),
 
             #[cfg(debug_assertions)]

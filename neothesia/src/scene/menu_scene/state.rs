@@ -104,7 +104,6 @@ pub enum Page {
     Exit,
     Main,
     Settings,
-    TrackSelection,
 }
 
 fn connect_io(data: &UiState, ctx: &mut Context) {
