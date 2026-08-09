@@ -68,6 +68,12 @@ impl Context {
         let text_renderer_factory = TextRendererFactory::new(&gpu);
         let quad_renderer_factory = QuadRendererFactory::new(&gpu, &transform_uniform);
 
+        // The synth carries the microphone out on its own stream, so point it at
+        // the queue before anything connects an output.
+        let mic_passthrough = MicPassthrough::default();
+        let mut output_manager = OutputManager::default();
+        output_manager.set_microphone(mic_passthrough.monitor());
+
         Self {
             window,
 
@@ -77,9 +83,9 @@ impl Context {
             text_renderer_factory,
             quad_renderer_factory,
 
-            output_manager: Default::default(),
+            output_manager,
             input_manager: InputManager::new(proxy.clone()),
-            mic_passthrough: Default::default(),
+            mic_passthrough,
             config,
             proxy,
             // The game the app is named for, out of the box.

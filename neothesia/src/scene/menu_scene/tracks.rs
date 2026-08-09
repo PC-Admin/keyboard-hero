@@ -75,7 +75,13 @@ impl super::MenuScene {
     fn listed_tracks(&self) -> usize {
         self.state
             .song()
-            .map(|song| song.file.tracks.iter().filter(|t| !t.notes.is_empty()).count())
+            .map(|song| {
+                song.file
+                    .tracks
+                    .iter()
+                    .filter(|t| !t.notes.is_empty())
+                    .count()
+            })
             .unwrap_or(0)
     }
 
@@ -149,9 +155,7 @@ impl super::MenuScene {
     pub fn performer_selector_ui(&mut self, ctx: &mut Context, ui: &mut nuon::Ui) {
         let win_w = ctx.window_state.logical_size.width;
 
-        if let Some(mode) =
-            crate::scene::performer_selector(ui, win_w, SEG_TOP, ctx.perform_mode)
-        {
+        if let Some(mode) = crate::scene::performer_selector(ui, win_w, SEG_TOP, ctx.perform_mode) {
             ctx.perform_mode = mode;
             // The song already loaded was assigned for the old mode, so bring
             // it along rather than waiting for a reload.
@@ -313,8 +317,8 @@ fn mic_row(ctx: &Context, ui: &mut nuon::Ui, w: f32) -> bool {
                 .pos(meter_x, meter_y)
                 .size(METER_W * fill, METER_H)
                 .color(if fill > 0.98 {
-                    // Against the ceiling: the limiter is holding it back, so
-                    // turn the microphone's own dial down a little.
+                    // The microphone itself is against the ceiling, which no
+                    // amount of care further down can undo: turn its dial down.
                     nuon::Color::new_u8(220, 110, 90, 1.0)
                 } else {
                     nuon::Color::new_u8(80, 200, 120, 1.0)

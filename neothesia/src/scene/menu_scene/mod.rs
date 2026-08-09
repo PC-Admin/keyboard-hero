@@ -452,6 +452,12 @@ impl Scene for MenuScene {
                 if event.key_pressed(Key::Character("f")) {
                     state::freeplay(&self.state, ctx);
                 }
+
+                // Singing along is the kind of thing you reach for on the way
+                // into a song, so it gets a key like the rest of them.
+                if event.key_pressed(Key::Character("m")) {
+                    ctx.mic_passthrough.toggle();
+                }
             }
             Page::Settings => {
                 if event.key_pressed(Key::Named(NamedKey::Escape)) {

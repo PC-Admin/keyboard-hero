@@ -1,29 +1,51 @@
-//! Microphone passthrough: what the mic hears, played straight back out of the
-//! speakers so you can sing over the piano the app is playing.
+//! Microphone passthrough: what the mic hears, mixed into the piano so you can
+//! sing along with it.
 //!
-//! It is a pair of audio streams of its own — capture from the system's default
-//! input, playback to its default output — rather than anything routed through
-//! the synth. That is the choice the sound effects already made
-//! (`playing_scene::sfx`), for the same reasons: it keeps working whichever MIDI
-//! output the player picked, external keyboards included, and it can be switched
-//! on and off without disturbing a note that is already sounding. Both halves go
-//! to the same device the synth uses, so they arrive mixed together.
+//! This captures from the system's default input and hands the samples to the
+//! synth, which adds them to its own output. It does **not** open a speaker
+//! stream of its own, and that is the whole point.
 //!
-//! The two streams run off two clocks that are close but never identical, so
-//! they cannot hand samples straight to each other. Capture writes into a
-//! lock-free ring and playback drains it; the ring absorbs the difference.
-//! [`PREFILL`] samples of head start mean a late playback callback still finds
-//! something waiting, and the [`MAX_FILL`] ceiling stops a fast microphone
-//! quietly growing the delay between singing and hearing yourself.
+//! It did, once, and on the machine this was written for that stream was
+//! inaudible. Not quietly wrong — measurably present and completely silent. It
+//! opened without error, appeared in the audio graph, linked to the right sink,
+//! and its content showed up in that sink's monitor at full level; a native
+//! client playing the identical tone at the identical amplitude to the identical
+//! sink was plainly audible at the same moment, and the app's own synth was
+//! audible too. Every layer that could be inspected said the audio was there.
+//! It could not be heard. Rather than keep hunting a fault that no measurement
+//! would show, the passthrough now rides the one stream that is known to reach
+//! the speakers: if you can hear the piano, you can hear yourself, because they
+//! are the same samples in the same buffer.
 //!
-//! The microphone's own dial sets how much signal arrives, as it should. What
-//! it cannot do is make that signal loud enough to sing over a piano: a voice
-//! reaches a USB mic at a level tens of decibels below where the synth runs,
-//! and passed on untouched it is technically playing and practically inaudible
-//! — you hear yourself in the room far louder than a copy that quiet. So there
-//! is one fixed [`MAKEUP_GAIN`] stage on the way through, and a limiter after
-//! it so that a shout flattens instead of squaring off into a crunch. Not a
-//! volume control: nothing to set, and the dial still decides what goes in.
+//! The cost is that there is nothing to hear until the synth is playing — no
+//! monitoring from the menu, and none at all if the output is a MIDI device
+//! rather than the built-in synth. The level meter still moves in the menu,
+//! which is what you actually need there: proof the microphone is heard before
+//! you start.
+//!
+//! Capture and the synth run off two clocks that are close but never identical,
+//! so they cannot hand samples straight to each other. Capture writes into a
+//! lock-free ring and the synth drains it; the ring absorbs the difference.
+//! [`PREFILL`] samples of head start mean a late read still finds something
+//! waiting, and the [`MAX_FILL`] ceiling stops a fast microphone quietly growing
+//! the delay between singing and hearing yourself.
+//!
+//! The microphone's own dial sets how much signal arrives, as it should; there
+//! is a fixed [`MAKEUP_GAIN`] stage on top to bring a voice up to where the
+//! synth runs, and a limiter after it so a shout flattens instead of squaring
+//! off into a crunch. Not a volume control: nothing to set, and the dial still
+//! decides what goes in.
+//!
+//! One thing to know before concluding this is broken, because it cost a day:
+//! **you will struggle to hear your own voice through it.** The round trip is
+//! about twenty-five milliseconds, which is too short to arrive as an echo — it
+//! fuses with the sound of your own head and reads as your voice being a little
+//! fuller. Your live voice is far louder than the speakers and masks the rest.
+//! Every other sound comes back obviously; your own speech does not. Tap the
+//! microphone or whisper and it is unmistakable, and on headphones the problem
+//! disappears entirely. This is a property of monitoring, not a fault, and no
+//! amount of gain fixes it — the level was measured at the speakers, arriving
+//! at full scale, while it was being reported as complete silence.
 
 use std::sync::{
     Arc,
@@ -57,13 +79,17 @@ const RING_CAPACITY: usize = 8192;
 
 /// How much louder the microphone is made on its way through.
 ///
-/// Measured rather than guessed. Speaking into a USB mic whose capture gain is
-/// already at maximum lands around -34 dBFS on average, with peaks some twenty
-/// decibels above that; the synth and the sound effects sit far higher. Six
-/// times over puts an ordinary voice in the same range as the piano it is meant
-/// to sing along with. Change this one number to taste — louder is a bigger
-/// figure, and the limiter below keeps the top end civil either way.
-const MAKEUP_GAIN: f32 = 6.0;
+/// A voice arrives at a USB mic well below where the synth runs, so some lift is
+/// needed to sing over a piano — the chord this was checked against peaks at
+/// about -13 dBFS. Four times puts a sensibly-set microphone a little under
+/// that, which is where a voice wants to sit next to the instrument rather than
+/// over it, and leaves the limiter below with something to do only on the loud
+/// notes.
+///
+/// It cannot be exactly right for every microphone, because how much signal
+/// arrives is the dial's job, not this constant's. That is what the meter in
+/// the menu is for. One number, easy to tune, if a particular setup wants more.
+const MAKEUP_GAIN: f32 = 4.0;
 
 /// Where the limiter starts to bend the signal.
 ///
@@ -126,7 +152,7 @@ impl Ring {
         self.written.store(written + 1, Ordering::Release);
     }
 
-    /// Playback side only. `None` means the ring ran dry.
+    /// Reading side only. `None` means the ring ran dry.
     fn pop(&self) -> Option<f32> {
         let read = self.read.load(Ordering::Relaxed);
         if read == self.written.load(Ordering::Acquire) {
@@ -137,25 +163,86 @@ impl Ring {
         self.read.store(read + 1, Ordering::Release);
         Some(sample)
     }
+
+    /// Throw away whatever is waiting. Only safe with the writer stopped, which
+    /// is the case when passthrough has just been switched off — dropping the
+    /// capture stream joins its thread before this runs.
+    fn clear(&self) {
+        self.read
+            .store(self.written.load(Ordering::Acquire), Ordering::Release);
+    }
 }
 
-/// The audio host and the two devices, found once and then kept for the life of
-/// the app — the same thing `SynthBackend` does with its own.
+/// What the synth reads the microphone from.
+///
+/// One of these lives for the whole session and is shared with whatever output
+/// stream the synth currently has, so switching soundfont or output device does
+/// not need to know anything about microphones. It yields silence whenever
+/// passthrough is off, which is what makes [`Monitor::next`] safe to call
+/// unconditionally from the audio callback — no branch, no flag to check.
+pub struct Monitor {
+    ring: Ring,
+    /// Reader-side state: hold silence until [`PREFILL`] has built up, and again
+    /// from any underrun until it has built up once more. Waiting out a gap is
+    /// quieter than chasing the capture stream sample by sample. An atomic
+    /// because it is shared by reference, though only the reader touches it.
+    primed: std::sync::atomic::AtomicBool,
+}
+
+impl Monitor {
+    fn new() -> Self {
+        Self {
+            ring: Ring::new(),
+            primed: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// The next microphone sample to add to the output, or zero when there is
+    /// nothing to add. Called once per frame from the synth's audio callback.
+    pub fn next(&self) -> f32 {
+        if !self.primed.load(Ordering::Relaxed) {
+            if self.ring.len() < PREFILL {
+                return 0.0;
+            }
+            self.primed.store(true, Ordering::Relaxed);
+        }
+
+        match self.ring.pop() {
+            Some(sample) => sample,
+            None => {
+                self.primed.store(false, Ordering::Relaxed);
+                0.0
+            }
+        }
+    }
+
+    /// Drop anything still queued, so switching passthrough off stops the sound
+    /// at once rather than trickling out the last few milliseconds of it.
+    fn reset(&self) {
+        self.ring.clear();
+        self.primed.store(false, Ordering::Relaxed);
+    }
+}
+
+/// The audio host and the capture device, found once and then kept for the life
+/// of the app — the same thing `SynthBackend` does with its own.
 ///
 /// Not rebuilt per toggle, and that matters: cpal's ALSA host keeps a
 /// process-wide context that tears down ALSA's global configuration when the
-/// last one goes, so a host created and dropped around every switch-on left the
-/// second one with a playback stream that reported success, appeared in the
-/// audio graph, and carried nothing. Finding the devices once takes that whole
-/// question off the table.
+/// last one goes, so a host created and dropped around every switch-on is a
+/// standing invitation for the second one to misbehave. Finding the device once
+/// takes that question off the table.
 ///
-/// Holding them does not pin a particular microphone: these name the system
-/// default, and which hardware that is gets resolved when a stream is opened,
-/// so each switch-on still picks up whatever the default is by then.
+/// Holding it does not pin a particular microphone: it names the system default,
+/// and which hardware that is gets resolved when a stream is opened, so each
+/// switch-on still picks up whatever the default is by then.
 struct Devices {
     _host: cpal::Host,
     capture: cpal::Device,
-    playback: cpal::Device,
+    /// Never opened here. Kept only to ask what rate the synth's stream runs at,
+    /// since that is the rate captured samples have to arrive at to be added to
+    /// it — and asking the same device the same way is how the two stay in step.
+    playback: Option<cpal::Device>,
 }
 
 impl Devices {
@@ -165,9 +252,7 @@ impl Devices {
         let capture = host
             .default_input_device()
             .ok_or_else(|| "no input device".to_string())?;
-        let playback = host
-            .default_output_device()
-            .ok_or_else(|| "no output device".to_string())?;
+        let playback = host.default_output_device();
 
         Ok(Self {
             _host: host,
@@ -175,14 +260,24 @@ impl Devices {
             playback,
         })
     }
+
+    /// The synth's sample rate, or the common default if the device will not
+    /// say — a rate that is wrong by a little only shifts the pitch by a little,
+    /// which beats refusing to run at all.
+    fn synth_rate(&self) -> u32 {
+        self.playback
+            .as_ref()
+            .and_then(|device| device.default_output_config().ok())
+            .map(|config| config.sample_rate())
+            .unwrap_or(48_000)
+    }
 }
 
-/// The streams, alive for exactly as long as passthrough is on: dropping them
-/// closes both, which is all "off" means — the microphone is released rather
-/// than held open in the background.
+/// The capture stream, alive for exactly as long as passthrough is on: dropping
+/// it closes the device, which is all "off" means — the microphone is released
+/// rather than held open in the background.
 struct Live {
     _capture: cpal::Stream,
-    _playback: cpal::Stream,
     /// The loudest thing the microphone has sent lately, as f32 bits: written
     /// by the capture callback, read by the menu. See [`MicPassthrough::level`].
     level: Arc<AtomicU32>,
@@ -191,15 +286,29 @@ struct Live {
 /// Microphone passthrough, off until asked. Session-lived on purpose — nothing
 /// is written to the config, so a launch never starts with an open mic the
 /// player has forgotten about.
-#[derive(Default)]
 pub struct MicPassthrough {
     /// Found on the first switch-on and kept from then on, however many times
     /// it is toggled after that. See [`Devices`].
     devices: Option<Devices>,
     live: Option<Live>,
+    /// Where captured samples go. Handed to the synth once at startup and shared
+    /// for the rest of the session, so nothing downstream has to be rebuilt when
+    /// passthrough is toggled — it simply stops being fed.
+    monitor: Arc<Monitor>,
     /// Why the last attempt to switch it on failed, so the menu can say so
     /// rather than looking like the click did nothing.
     error: Option<String>,
+}
+
+impl Default for MicPassthrough {
+    fn default() -> Self {
+        Self {
+            devices: None,
+            live: None,
+            monitor: Arc::new(Monitor::new()),
+            error: None,
+        }
+    }
 }
 
 impl MicPassthrough {
@@ -207,19 +316,26 @@ impl MicPassthrough {
         self.live.is_some()
     }
 
+    /// The shared queue the synth adds to its output. Handed over once, at
+    /// startup, and valid whether or not passthrough is ever switched on.
+    pub fn monitor(&self) -> Arc<Monitor> {
+        Arc::clone(&self.monitor)
+    }
+
     /// Set when switching on failed, cleared by anything that succeeds.
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
     }
 
-    /// The peak going out to the speakers, 0 to 1, decaying between peaks.
-    /// Zero while it is off.
+    /// The peak the microphone is sending, 0 to 1, decaying between peaks.
+    /// Zero while passthrough is off.
     ///
-    /// Worth showing because a passthrough that is working and a passthrough
-    /// that is silent look identical from the outside — the only difference is
-    /// a sound you may well be talking over. Read after the gain and the
-    /// limiter, so a bar that moves means audio is leaving the app, and a bar
-    /// against the top means the limiter is holding a shout back.
+    /// Read straight off the microphone, before the gain, because setting the
+    /// dial is what it is for: a bar that moves when you speak says the mic is
+    /// heard, and a bar jammed at the top says the dial is turned up past what
+    /// the microphone can take and should come down. It is also the only
+    /// feedback you get in the menu, where there is no synth stream to sing
+    /// along with yet.
     pub fn level(&self) -> f32 {
         self.live
             .as_ref()
@@ -249,7 +365,7 @@ impl MicPassthrough {
 
         let devices = self.devices.as_ref().expect("just opened above");
 
-        match open_streams(devices) {
+        match open_capture(devices, Arc::clone(&self.monitor)) {
             Ok(live) => {
                 self.live = Some(live);
                 self.error = None;
@@ -262,67 +378,58 @@ impl MicPassthrough {
     }
 
     fn stop(&mut self) {
+        // Dropped first: this joins the capture thread, so nothing is still
+        // writing by the time the queue is emptied.
         self.live = None;
+        self.monitor.reset();
         self.error = None;
     }
 }
 
-/// Open a stream on each device and start moving samples between them.
-fn open_streams(devices: &Devices) -> Result<Live, String> {
+/// Open the microphone and start feeding the monitor.
+fn open_capture(devices: &Devices, monitor: Arc<Monitor>) -> Result<Live, String> {
     let capture_device = &devices.capture;
-    let playback_device = &devices.playback;
 
     let capture_supported = capture_device
         .default_input_config()
         .map_err(|err| format!("input device: {err}"))?;
-    let playback_supported = playback_device
-        .default_output_config()
-        .map_err(|err| format!("output device: {err}"))?;
 
     let capture_format = capture_supported.sample_format();
-    let playback_format = playback_supported.sample_format();
     let capture_rate = capture_supported.sample_rate();
-    let playback_rate = playback_supported.sample_rate();
-
     let capture_config = stream_config(capture_supported);
-    let playback_config = stream_config(playback_supported);
 
-    // Named as well as measured: both ends follow whatever the system has set
-    // as its default, and "which device did it actually pick" is the first
-    // question worth answering when nothing can be heard.
+    // The rate the synth will be running at, which is what these samples have
+    // to arrive at to be added to its output frame by frame. Asked of the same
+    // device and the same way `SynthBackend` asks, so the two agree.
+    let synth_rate = devices.synth_rate();
+
+    // Named as well as measured: it follows whatever the system has set as its
+    // default, and "which device did it actually pick" is the first question
+    // worth answering when nothing can be heard.
     log::info!(
         "microphone passthrough: capture \"{capture_device}\" {capture_rate} Hz {}ch \
-         {capture_format:?} -> playback \"{playback_device}\" {playback_rate} Hz {}ch \
-         {playback_format:?}, buffer {:?}",
+         {capture_format:?} -> synth at {synth_rate} Hz, buffer {:?}",
         capture_config.channels,
-        playback_config.channels,
-        playback_config.buffer_size,
+        capture_config.buffer_size,
     );
 
-    let ring = Arc::new(Ring::new());
     let level = Arc::new(AtomicU32::new(0));
 
     let capture = capture_stream(
         capture_device,
         capture_config,
         capture_format,
-        Arc::clone(&ring),
+        monitor,
         Arc::clone(&level),
         capture_rate,
-        playback_rate,
+        synth_rate,
     )
     .map_err(|err| format!("microphone: {err}"))?;
 
-    let playback = playback_stream(playback_device, playback_config, playback_format, ring)
-        .map_err(|err| format!("speakers: {err}"))?;
-
-    // Capture first, so the ring is already filling by the time playback looks.
     capture.play().map_err(|err| format!("microphone: {err}"))?;
-    playback.play().map_err(|err| format!("speakers: {err}"))?;
 
     Ok(Live {
         _capture: capture,
-        _playback: playback,
         level,
     })
 }
@@ -348,14 +455,14 @@ fn capture_stream(
     device: &cpal::Device,
     config: cpal::StreamConfig,
     format: cpal::SampleFormat,
-    ring: Arc<Ring>,
+    monitor: Arc<Monitor>,
     level: Arc<AtomicU32>,
     capture_rate: u32,
-    playback_rate: u32,
+    synth_rate: u32,
 ) -> Result<cpal::Stream, String> {
     macro_rules! build {
         ($t:ty) => {
-            build_capture::<$t>(device, config, ring, level, capture_rate, playback_rate)
+            build_capture::<$t>(device, config, monitor, level, capture_rate, synth_rate)
                 .map_err(|err| err.to_string())
         };
     }
@@ -378,17 +485,27 @@ fn capture_stream(
 fn build_capture<T>(
     device: &cpal::Device,
     config: cpal::StreamConfig,
-    ring: Arc<Ring>,
+    monitor: Arc<Monitor>,
     level: Arc<AtomicU32>,
     capture_rate: u32,
-    playback_rate: u32,
+    synth_rate: u32,
 ) -> Result<cpal::Stream, cpal::Error>
 where
     T: cpal::SizedSample,
     f32: cpal::FromSample<T>,
 {
     let channels = config.channels as usize;
-    let mut resampler = Resampler::new(capture_rate, playback_rate);
+    let mut resampler = Resampler::new(capture_rate, synth_rate);
+
+    // Diagnostic, kept because it is what finally settled this: set
+    // KEYBOARD_HERO_MIC_TEST_TONE and a steady tone goes where the microphone's
+    // samples would, so "can you hear it" answers whether everything downstream
+    // of capture works, separately from whether the microphone is loud enough
+    // to notice. Those two questions look identical from the outside and cost a
+    // day of chasing the wrong one.
+    let test_tone = std::env::var_os("KEYBOARD_HERO_MIC_TEST_TONE").is_some();
+    let tone_step = 440.0 * std::f32::consts::TAU / capture_rate as f32;
+    let mut tone_phase = 0.0f32;
 
     device.build_input_stream(
         config,
@@ -397,19 +514,31 @@ where
 
             for frame in input.chunks(channels) {
                 // A microphone is one voice however many channels it arrives
-                // on, and playback puts it back out of all of them, so fold it
+                // on, and the synth adds it to both of its channels, so fold it
                 // down here rather than carrying the copies through the ring.
                 let sample = frame.iter().map(|s| f32::from_sample(*s)).sum::<f32>()
                     / frame.len().max(1) as f32;
 
-                // Brought up to a level you can actually hear, then held under
-                // full scale. The meter reads from here, after both, so the bar
-                // is what comes out of the speakers rather than what went into
-                // the microphone.
+                // Metered before anything is done to it, because what the meter
+                // is for is setting the microphone's own dial. After the gain
+                // and the limiter every reading crowds the top of the scale and
+                // says nothing about whether the dial is right — worse, it
+                // hides the one thing worth warning about, which is a
+                // microphone already clipping before the app sees it.
+                peak = peak.max(sample.abs());
+
+                // Brought up to a level you can hear over a piano, then held
+                // under full scale.
                 let sample = limit(sample * MAKEUP_GAIN);
 
-                peak = peak.max(sample.abs());
-                resampler.feed(sample, |sample| ring.push(sample));
+                let sample = if test_tone {
+                    tone_phase = (tone_phase + tone_step) % std::f32::consts::TAU;
+                    tone_phase.sin() * 0.3
+                } else {
+                    sample
+                };
+
+                resampler.feed(sample, |sample| monitor.ring.push(sample));
             }
 
             // Nothing else writes this, so a plain read-modify-write is safe;
@@ -487,87 +616,14 @@ impl Resampler {
     }
 }
 
-fn playback_stream(
-    device: &cpal::Device,
-    config: cpal::StreamConfig,
-    format: cpal::SampleFormat,
-    ring: Arc<Ring>,
-) -> Result<cpal::Stream, String> {
-    macro_rules! build {
-        ($t:ty) => {
-            build_playback::<$t>(device, config, ring).map_err(|err| err.to_string())
-        };
-    }
-
-    match format {
-        cpal::SampleFormat::I8 => build!(i8),
-        cpal::SampleFormat::I16 => build!(i16),
-        cpal::SampleFormat::I32 => build!(i32),
-        cpal::SampleFormat::I64 => build!(i64),
-        cpal::SampleFormat::U8 => build!(u8),
-        cpal::SampleFormat::U16 => build!(u16),
-        cpal::SampleFormat::U32 => build!(u32),
-        cpal::SampleFormat::U64 => build!(u64),
-        cpal::SampleFormat::F32 => build!(f32),
-        cpal::SampleFormat::F64 => build!(f64),
-        format => Err(format!("unsupported sample format {format}")),
-    }
-}
-
-fn build_playback<T>(
-    device: &cpal::Device,
-    config: cpal::StreamConfig,
-    ring: Arc<Ring>,
-) -> Result<cpal::Stream, cpal::Error>
-where
-    T: cpal::SizedSample + cpal::FromSample<f32>,
-{
-    let channels = config.channels as usize;
-
-    // Silent until the ring has its head start, and silent again from an
-    // underrun until it has built that up once more. Waiting out a gap is
-    // quieter than chasing the capture stream sample by sample.
-    let mut primed = false;
-
-    device.build_output_stream(
-        config,
-        move |output: &mut [T], _: &cpal::OutputCallbackInfo| {
-            if !primed {
-                if ring.len() < PREFILL {
-                    output.fill(T::EQUILIBRIUM);
-                    return;
-                }
-                primed = true;
-            }
-
-            let mut frames = output.chunks_mut(channels);
-            for frame in frames.by_ref() {
-                let Some(sample) = ring.pop() else {
-                    primed = false;
-                    frame.fill(T::EQUILIBRIUM);
-                    break;
-                };
-                frame.fill(T::from_sample(sample));
-            }
-
-            // Whatever is left of the buffer once the ring ran dry.
-            for frame in frames {
-                frame.fill(T::EQUILIBRIUM);
-            }
-        },
-        |err| log::warn!("microphone playback: {err}"),
-        None,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// What a second of capture turns into, so a pair of rates can be checked
     /// against the count it is supposed to produce.
-    fn resample(capture_rate: u32, playback_rate: u32) -> Vec<f32> {
-        let mut resampler = Resampler::new(capture_rate, playback_rate);
+    fn resample(capture_rate: u32, synth_rate: u32) -> Vec<f32> {
+        let mut resampler = Resampler::new(capture_rate, synth_rate);
         let mut out = Vec::new();
         for n in 0..capture_rate {
             resampler.feed(n as f32, |sample| out.push(sample));
@@ -647,15 +703,79 @@ mod tests {
     }
 
     #[test]
-    fn a_speaking_voice_ends_up_somewhere_you_can_hear_it() {
-        // The measured article: peaks around -15 dBFS off the microphone, which
-        // is a healthy input level and still far below the synth. After the
-        // makeup stage it should sit near the top of the range without the
-        // limiter having to crush it.
-        let measured_peak = 10f32.powf(-15.0 / 20.0);
-        let out = limit(measured_peak * MAKEUP_GAIN);
-        assert!(out > 0.7, "still too quiet to hear: {out}");
-        assert!(out < 1.0, "past full scale: {out}");
+    fn a_voice_lands_in_the_same_range_as_the_piano() {
+        // The piano this has to sit beside peaks around -13 dBFS, measured off
+        // the synth's own stream. A microphone with its dial set sensibly sends
+        // speech averaging about -22 dBFS, and the job of the gain is to put
+        // that in the same neighbourhood: loud enough to be part of the music,
+        // not so loud it becomes the whole of it.
+        let dialled_in_average = 10f32.powf(-22.0 / 20.0);
+        let out_db = 20.0 * limit(dialled_in_average * MAKEUP_GAIN).log10();
+        assert!(
+            (-20.0..-3.0).contains(&out_db),
+            "a voice lands at {out_db:.1} dBFS, nowhere near the piano at -13"
+        );
+
+        // The peaks that come with it are held, never clipped: speech runs
+        // roughly sixteen decibels above its average, which at this gain is
+        // over the top and has to be caught rather than wrapped.
+        let dialled_in_peak = 10f32.powf(-6.0 / 20.0);
+        assert!(
+            limit(dialled_in_peak * MAKEUP_GAIN) <= 1.0,
+            "past full scale"
+        );
+    }
+
+    #[test]
+    fn the_monitor_is_silent_until_it_has_a_head_start() {
+        let monitor = Monitor::new();
+
+        // Nothing captured yet: the synth must get exact zeros, or switching
+        // passthrough on would tick.
+        assert_eq!(monitor.next(), 0.0);
+
+        // Still short of the head start, so still silent.
+        for _ in 0..PREFILL - 1 {
+            monitor.ring.push(0.5);
+        }
+        assert_eq!(monitor.next(), 0.0);
+
+        // One more and it starts, from the oldest sample.
+        monitor.ring.push(0.5);
+        assert_eq!(monitor.next(), 0.5);
+    }
+
+    #[test]
+    fn the_monitor_goes_quiet_again_when_it_runs_dry() {
+        let monitor = Monitor::new();
+        for _ in 0..PREFILL {
+            monitor.ring.push(0.25);
+        }
+
+        for _ in 0..PREFILL {
+            assert_eq!(monitor.next(), 0.25);
+        }
+
+        // Drained. Silence rather than anything stale, and it waits for a fresh
+        // head start rather than chasing the microphone sample by sample.
+        assert_eq!(monitor.next(), 0.0);
+        monitor.ring.push(0.25);
+        assert_eq!(monitor.next(), 0.0, "should not restart on a single sample");
+    }
+
+    #[test]
+    fn switching_off_drops_what_was_still_queued() {
+        let monitor = Monitor::new();
+        for _ in 0..PREFILL {
+            monitor.ring.push(0.75);
+        }
+        assert_eq!(monitor.next(), 0.75);
+
+        monitor.reset();
+
+        // Nothing trickles out after the microphone is released.
+        assert_eq!(monitor.next(), 0.0);
+        assert_eq!(monitor.ring.len(), 0);
     }
 
     #[test]
