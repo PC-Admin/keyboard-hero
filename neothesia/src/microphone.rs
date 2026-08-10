@@ -940,6 +940,21 @@ impl VoiceTake {
         self.samples.len()
     }
 
+    /// The average level across the take, as an amplitude.
+    ///
+    /// The number [`VoiceTake::peak`] cannot give: ten seconds of singing and
+    /// ten seconds of silence with one click in it have the same peak and
+    /// nothing else in common. This is what says whether there is a performance
+    /// in here or just a spike.
+    pub fn rms(&self) -> f32 {
+        if self.samples.is_empty() {
+            return 0.0;
+        }
+
+        let sum: f64 = self.samples.iter().map(|s| (*s as f64) * (*s as f64)).sum();
+        (sum / self.samples.len() as f64).sqrt() as f32
+    }
+
     /// The loudest sample in the take. Zero means the microphone was open and
     /// heard nothing, which is worth telling somebody about before they go
     /// looking for their voice in the file.

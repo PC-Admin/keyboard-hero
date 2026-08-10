@@ -356,11 +356,14 @@ impl FreeplayRecorder {
         // from the outside: no microphone, a silent one, no samples collected,
         // or a preview that was never built.
         log::info!(
-            "recording: {:.1}s, {} voice samples at {rate} Hz, peak {:.3}, {outcome:?}, \
-             {} notes to preview",
+            "recording: {:.1}s, {} voice samples at {rate} Hz, peak {:.3} ({:.1} dBFS), \
+             rms {:.5} ({:.1} dBFS), {outcome:?}, {} notes to preview",
             stop_time.as_secs_f32(),
             voice.as_ref().map(|take| take.len()).unwrap_or(0),
             voice.as_ref().map(|take| take.peak()).unwrap_or(0.0),
+            dbfs(voice.as_ref().map(|take| take.peak()).unwrap_or(0.0)),
+            voice.as_ref().map(|take| take.rms()).unwrap_or(0.0),
+            dbfs(voice.as_ref().map(|take| take.rms()).unwrap_or(0.0)),
             if previewable { "some" } else { "no" },
         );
 
@@ -422,6 +425,16 @@ impl FreeplayRecorder {
         self.recorded()
             .is_some_and(|take| take.smf.is_some() || take.voice.is_some())
     }
+}
+
+/// An amplitude in decibels relative to full scale, which is the scale levels
+/// are actually judged on — the difference between 0.4 and 0.04 reads as a
+/// factor of ten and sounds like a fifth of the loudness.
+fn dbfs(amplitude: f32) -> f32 {
+    if amplitude <= 0.0 {
+        return -99.0;
+    }
+    20.0 * amplitude.log10()
 }
 
 fn duration_to_ticks(duration: Duration) -> u32 {
