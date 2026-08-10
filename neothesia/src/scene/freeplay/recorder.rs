@@ -351,6 +351,19 @@ impl FreeplayRecorder {
         let smf = to_smf(&in_progress.events).ok();
         let previewable = smf.is_some();
 
+        // Says in one line what a take ended up with, because "why can I not
+        // hear my singing" has several possible answers and they look identical
+        // from the outside: no microphone, a silent one, no samples collected,
+        // or a preview that was never built.
+        log::info!(
+            "recording: {:.1}s, {} voice samples at {rate} Hz, peak {:.3}, {outcome:?}, \
+             {} notes to preview",
+            stop_time.as_secs_f32(),
+            voice.as_ref().map(|take| take.len()).unwrap_or(0),
+            voice.as_ref().map(|take| take.peak()).unwrap_or(0.0),
+            if previewable { "some" } else { "no" },
+        );
+
         self.state = RecorderState::Recorded(RecordedTake {
             duration: stop_time,
             smf,

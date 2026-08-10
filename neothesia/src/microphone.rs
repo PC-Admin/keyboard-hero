@@ -572,9 +572,11 @@ impl MicPassthrough {
 
         if self.live.is_none() {
             self.tape.disarm();
+            log::warn!("recording: no microphone, this take will be piano only");
             return false;
         }
 
+        log::info!("recording: capturing at {} Hz", self.rate);
         true
     }
 
@@ -931,6 +933,11 @@ impl VoiceTake {
             samples,
             rate: rate.max(1),
         }
+    }
+
+    /// How many samples it holds. Together with the rate, that is its length.
+    pub fn len(&self) -> usize {
+        self.samples.len()
     }
 
     /// The loudest sample in the take. Zero means the microphone was open and
@@ -1453,6 +1460,69 @@ mod tests {
             .map(|pair| i16::from_le_bytes(pair.try_into().unwrap()))
             .collect();
         assert_eq!(samples, vec![i16::MAX, -i16::MAX]);
+    }
+
+    #[test]
+    fn a_voice_survives_the_whole_trip_from_microphone_to_speaker() {
+        // Every stage the real thing goes through, in order, with only the
+        // device and the frame timer left out: capture pushes into the sinks,
+        // the frame loop sweeps the tape into a take, the take is played back
+        // through the monitor, and the synth reads it out again.
+        //
+        // Each stage is covered on its own above. This is here because the
+        // failure worth catching is a join between two of them rather than
+        // anything inside one, and a join is exactly what per-stage tests miss.
+        let sinks = Sinks {
+            monitor: Arc::new(Monitor::new()),
+            tape: Arc::new(Tape::new()),
+        };
+
+        // Recording with monitoring off, which is the combination the freeplay
+        // screen uses: nothing is being heard live, and it must still be kept.
+        sinks.tape.arm();
+
+        let sung: Vec<f32> = (0..4000).map(|n| ((n as f32) / 50.0).sin() * 0.4).collect();
+
+        // Captured in callback-sized bursts and swept up between them, the way
+        // the frame loop actually meets the audio thread.
+        let mut collected = Vec::new();
+        for burst in sung.chunks(128) {
+            for &sample in burst {
+                sinks.push(sample);
+            }
+            sinks.tape.collect(&mut collected);
+        }
+        sinks.tape.disarm();
+        sinks.tape.collect(&mut collected);
+
+        assert_eq!(collected, sung, "the take is not what was sung");
+
+        // Stopping the take closes the microphone; the preview then plays back
+        // through the same monitor the passthrough would have used.
+        let take = Arc::new(VoiceTake::new(collected, 48_000));
+        let monitor = Arc::clone(&sinks.monitor);
+        let mut playback = VoicePlayback::new(Arc::clone(&monitor), Arc::clone(&take));
+
+        let mut heard = Vec::new();
+        playback.update(true);
+        // Frames and audio callbacks interleaved, as they do in the app, and
+        // run on past the end of the take so the tail is covered too.
+        for _ in 0..40 {
+            for _ in 0..128 {
+                heard.push(monitor.next());
+            }
+            playback.update(true);
+        }
+
+        assert_eq!(
+            heard[..sung.len()],
+            sung[..],
+            "what came out of the synth is not what went into the microphone"
+        );
+        assert!(
+            heard[sung.len()..].iter().all(|sample| *sample == 0.0),
+            "the take carried on making noise after it ended"
+        );
     }
 
     #[test]
