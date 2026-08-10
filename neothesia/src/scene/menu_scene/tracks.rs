@@ -64,6 +64,8 @@ const STATUS_W: f32 = 90.0;
 /// The level meter beside it.
 const METER_W: f32 = 90.0;
 const METER_H: f32 = 6.0;
+/// The headphones note under the row, shown only while the mic is live.
+const WARN_H: f32 = 18.0;
 /// Quietest level the meter draws anything for. Below roughly this there is
 /// nothing to hear anyway, so an empty bar is the honest reading — and the
 /// scale is in decibels because that is how loudness is heard, and a linear bar
@@ -342,6 +344,21 @@ fn mic_row(ctx: &Context, ui: &mut nuon::Ui, w: f32) -> bool {
         .font_size(12.0)
         .color(status_color)
         .build(ui);
+
+    // Said at the moment it starts mattering, and only then. Over speakers your
+    // own voice masks the passthrough almost completely and the honest reaction
+    // is that the feature is broken; on headphones it is plainly there. Cheaper
+    // to warn than to let someone go looking for a fault that is not there.
+    if on {
+        nuon::label()
+            .pos(pad, ROW_H)
+            .size(w - pad * 2.0, WARN_H)
+            .text("Warning: headphones recommended to hear yourself sing")
+            .text_justify(TextJustify::Left)
+            .font_size(11.0)
+            .color(nuon::Color::new_u8(210, 175, 110, 1.0))
+            .build(ui);
+    }
 
     clicked
 }

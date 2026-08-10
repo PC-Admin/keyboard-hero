@@ -37,15 +37,25 @@
 //! decides what goes in.
 //!
 //! One thing to know before concluding this is broken, because it cost a day:
-//! **you will struggle to hear your own voice through it.** The round trip is
-//! about twenty-five milliseconds, which is too short to arrive as an echo — it
-//! fuses with the sound of your own head and reads as your voice being a little
-//! fuller. Your live voice is far louder than the speakers and masks the rest.
-//! Every other sound comes back obviously; your own speech does not. Tap the
-//! microphone or whisper and it is unmistakable, and on headphones the problem
-//! disappears entirely. This is a property of monitoring, not a fault, and no
-//! amount of gain fixes it — the level was measured at the speakers, arriving
-//! at full scale, while it was being reported as complete silence.
+//! **on speakers you will struggle to hear your own voice through it.** The
+//! round trip is on the order of fifteen milliseconds, which is far too short to
+//! arrive as an echo — it fuses with the sound of your own head and reads as
+//! your voice being a little fuller. Your live voice is far louder at your own
+//! ears than the speakers are and masks the rest. Every other sound comes back
+//! obviously; your own speech does not. Tap the microphone or whisper and it is
+//! unmistakable, and on headphones the problem disappears entirely. This is a
+//! property of monitoring, not a fault, and no amount of gain fixes it — the
+//! level was measured at the speakers, arriving at full scale, while it was
+//! being reported as complete silence. Hence the line the menu prints under the
+//! row when it is switched on: headphones are the tool for this job, and saying
+//! so up front costs a sentence and saves the day it cost here.
+//!
+//! It is not a PA either, which is the other way to expect this to behave. A PA
+//! is audible over the performer's own voice because its speakers are much
+//! louder than they are and are pointed away from the microphone. Here the
+//! output is already at full scale by the time it leaves — whether it can beat
+//! your live voice is a question about how loud the speakers in the room go,
+//! and nothing in this file can raise that ceiling.
 
 use std::sync::{
     Arc,
@@ -57,21 +67,25 @@ use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
 };
 
-/// Frames per callback to ask both devices for — the same figure the synth asks
-/// for, for the same reason: this is monitoring, so the buffer is delay you can
-/// hear. See `output_manager::synth_backend`.
-const TARGET_BUFFER_FRAMES: u32 = 256;
+/// Frames per callback to ask the capture device for.
+///
+/// Half what the synth asks for. The synth's buffer is the delay between
+/// pressing a key and hearing it and is already as tight as it can safely go;
+/// this one only ever holds a voice, so it can be shorter without putting the
+/// piano at risk of a dropout. At 48kHz this is under three milliseconds.
+const TARGET_BUFFER_FRAMES: u32 = 128;
 
-/// Samples of head start playback waits for before it begins, and again after
-/// any underrun. Two callbacks' worth, so one late one costs nothing.
-const PREFILL: usize = 512;
+/// Samples of head start the synth waits for before it starts draining, and
+/// again after any underrun. Two capture callbacks' worth, so one late one
+/// costs nothing.
+const PREFILL: usize = 256;
 
 /// How far ahead capture is allowed to get. Without a ceiling, a capture clock
 /// even slightly faster than playback fills the ring and stays full, and the
 /// delay settles at whatever the ring holds rather than at [`PREFILL`]. Samples
-/// past this are dropped: a sample lost every few seconds is inaudible, a tenth
-/// of a second of latency is not.
-const MAX_FILL: usize = 2048;
+/// past this are dropped: a sample lost every few seconds is inaudible, and
+/// twenty milliseconds of latency you can hear.
+const MAX_FILL: usize = 1024;
 
 /// Ring capacity. A power of two so the wrap is a mask, and comfortably above
 /// [`MAX_FILL`], which is what actually bounds the fill.
