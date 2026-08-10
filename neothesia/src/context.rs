@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use crate::{
     NeothesiaEvent, TransformUniform, config::Config, input_manager::InputManager,
-    output_manager::OutputManager, song::PerformMode, utils::window::WindowState,
+    microphone::MicPassthrough, output_manager::OutputManager, song::PerformMode,
+    utils::window::WindowState,
 };
 use neothesia_core::render::{QuadRendererFactory, TextRendererFactory};
 use wgpu_jumpstart::{Gpu, Uniform};
@@ -22,6 +23,10 @@ pub struct Context {
 
     pub output_manager: OutputManager,
     pub input_manager: InputManager,
+    /// Singing along: off at launch, and stays wherever the player left it for
+    /// the rest of the session — including into a song, which is the point of
+    /// switching it on from the menu.
+    pub mic_passthrough: MicPassthrough,
     pub config: Config,
 
     pub proxy: EventLoopProxy<NeothesiaEvent>,
@@ -63,6 +68,12 @@ impl Context {
         let text_renderer_factory = TextRendererFactory::new(&gpu);
         let quad_renderer_factory = QuadRendererFactory::new(&gpu, &transform_uniform);
 
+        // The synth carries the microphone out on its own stream, so point it at
+        // the queue before anything connects an output.
+        let mic_passthrough = MicPassthrough::default();
+        let mut output_manager = OutputManager::default();
+        output_manager.set_microphone(mic_passthrough.monitor());
+
         Self {
             window,
 
@@ -72,8 +83,9 @@ impl Context {
             text_renderer_factory,
             quad_renderer_factory,
 
-            output_manager: Default::default(),
+            output_manager,
             input_manager: InputManager::new(proxy.clone()),
+            mic_passthrough,
             config,
             proxy,
             // The game the app is named for, out of the box.

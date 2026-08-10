@@ -90,6 +90,12 @@ pub struct OutputManager {
     synth_backend: Option<SynthBackend>,
     midi_backend: Option<MidiBackend>,
 
+    /// Where the synth picks up the microphone, when one is being passed
+    /// through. Handed over once at startup and kept, so every synth connection
+    /// made afterwards — a new soundfont, a switch of output and back — gets it
+    /// without the callers of [`OutputManager::connect`] knowing it exists.
+    microphone: Option<std::sync::Arc<crate::microphone::Monitor>>,
+
     output_connection: (OutputDescriptor, OutputConnection),
 }
 
@@ -122,9 +128,15 @@ impl OutputManager {
             #[cfg(feature = "synth")]
             synth_backend,
             midi_backend,
+            microphone: None,
 
             output_connection: (OutputDescriptor::DummyOutput, OutputConnection::DummyOutput),
         }
+    }
+
+    /// Tell the synth where to find the microphone. Called once, at startup.
+    pub fn set_microphone(&mut self, monitor: std::sync::Arc<crate::microphone::Monitor>) {
+        self.microphone = Some(monitor);
     }
 
     pub fn outputs(&self) -> Vec<OutputDescriptor> {
@@ -149,17 +161,18 @@ impl OutputManager {
                 #[cfg(feature = "synth")]
                 OutputDescriptor::Synth(ref font) => {
                     if let Some(ref mut synth) = self.synth_backend {
+                        let mic = self.microphone.clone();
                         if let Some(font) = font.clone() {
                             self.output_connection = (
                                 desc,
-                                OutputConnection::Synth(synth.new_output_connection(&font)),
+                                OutputConnection::Synth(synth.new_output_connection(&font, mic)),
                             );
                         } else if let Some(path) = crate::utils::resources::default_sf2()
                             && path.exists()
                         {
                             self.output_connection = (
                                 desc,
-                                OutputConnection::Synth(synth.new_output_connection(&path)),
+                                OutputConnection::Synth(synth.new_output_connection(&path, mic)),
                             );
                         }
                     }
