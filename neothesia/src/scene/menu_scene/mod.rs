@@ -454,10 +454,9 @@ impl Scene for MenuScene {
                 }
 
                 // Singing along is the kind of thing you reach for on the way
-                // into a song, so it gets a key like the rest of them.
-                if event.key_pressed(Key::Character("m")) {
-                    ctx.mic_passthrough.toggle();
-                }
+                // into a song, so it gets a key like the rest of them — the
+                // same one freeplay uses, from the same place.
+                crate::scene::handle_mic_toggle_event(ctx, event);
             }
             Page::Settings => {
                 if event.key_pressed(Key::Named(NamedKey::Escape)) {

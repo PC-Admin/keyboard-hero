@@ -66,11 +66,6 @@ const METER_W: f32 = 90.0;
 const METER_H: f32 = 6.0;
 /// The headphones note under the row, shown only while the mic is live.
 const WARN_H: f32 = 18.0;
-/// Quietest level the meter draws anything for. Below roughly this there is
-/// nothing to hear anyway, so an empty bar is the honest reading — and the
-/// scale is in decibels because that is how loudness is heard, and a linear bar
-/// would sit flat across most of its travel.
-const METER_FLOOR_DB: f32 = -60.0;
 
 impl super::MenuScene {
     /// Tracks worth listing: the ones with notes in them.
@@ -313,7 +308,7 @@ fn mic_row(ctx: &Context, ui: &mut nuon::Ui, w: f32) -> bool {
             .border_radius([3.0; 4])
             .build(ui);
 
-        let fill = meter_fill(ctx.mic_passthrough.level());
+        let fill = crate::microphone::level_fraction(ctx.mic_passthrough.level());
         if fill > 0.0 {
             nuon::quad()
                 .pos(meter_x, meter_y)
@@ -361,17 +356,6 @@ fn mic_row(ctx: &Context, ui: &mut nuon::Ui, w: f32) -> bool {
     }
 
     clicked
-}
-
-/// How much of the meter a peak fills, on a decibel scale running from
-/// [`METER_FLOOR_DB`] up to full scale.
-fn meter_fill(peak: f32) -> f32 {
-    if peak <= 0.0 {
-        return 0.0;
-    }
-
-    let db = 20.0 * peak.log10();
-    ((db - METER_FLOOR_DB) / -METER_FLOOR_DB).clamp(0.0, 1.0)
 }
 
 /// Cut to `max` characters, counted as characters rather than bytes so a device
@@ -519,24 +503,4 @@ fn track_row(
     }
 
     res
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_meter_reads_in_decibels() {
-        assert_eq!(meter_fill(0.0), 0.0, "silence");
-        assert_eq!(meter_fill(1.0), 1.0, "full scale");
-
-        // Half the bar is half the way up in decibels, not in amplitude: -30
-        // dBFS, which is an amplitude of about 0.032.
-        assert!((meter_fill(0.0316) - 0.5).abs() < 0.01);
-
-        // A microphone sending nothing but its own noise leaves it near empty,
-        // and anything past full scale cannot push it further.
-        assert!(meter_fill(0.0001) < 0.05);
-        assert_eq!(meter_fill(4.0), 1.0);
-    }
 }
