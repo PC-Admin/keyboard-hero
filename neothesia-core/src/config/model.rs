@@ -179,6 +179,9 @@ pub struct AppearanceConfigV1 {
 
     #[serde(default)]
     pub chord_identifier: bool,
+
+    #[serde(default = "default_spectrum")]
+    pub spectrum: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -195,6 +198,7 @@ impl Default for AppearanceConfig {
             horizontal_guidelines: default_horizontal_guidelines(),
             glow: default_glow(),
             chord_identifier: false,
+            spectrum: default_spectrum(),
         })
     }
 }
@@ -246,6 +250,12 @@ fn default_horizontal_guidelines() -> bool {
 }
 
 fn default_glow() -> bool {
+    true
+}
+
+/// On out of the box: it is a novelty this fork exists for, it costs one
+/// transform a frame, and a corner of the screen nobody was using.
+fn default_spectrum() -> bool {
     true
 }
 

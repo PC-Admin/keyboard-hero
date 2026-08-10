@@ -96,6 +96,12 @@ pub struct OutputManager {
     /// without the callers of [`OutputManager::connect`] knowing it exists.
     microphone: Option<std::sync::Arc<crate::microphone::Monitor>>,
 
+    /// What the on-screen analyser listens to. Made here and kept for the whole
+    /// session, so switching soundfont or output device and back leaves the
+    /// display reading from the same place it always did — the new stream is
+    /// simply handed the same tap.
+    spectrum: std::sync::Arc<crate::spectrum::SpectrumTap>,
+
     output_connection: (OutputDescriptor, OutputConnection),
 }
 
@@ -129,6 +135,7 @@ impl OutputManager {
             synth_backend,
             midi_backend,
             microphone: None,
+            spectrum: Default::default(),
 
             output_connection: (OutputDescriptor::DummyOutput, OutputConnection::DummyOutput),
         }
@@ -137,6 +144,12 @@ impl OutputManager {
     /// Tell the synth where to find the microphone. Called once, at startup.
     pub fn set_microphone(&mut self, monitor: std::sync::Arc<crate::microphone::Monitor>) {
         self.microphone = Some(monitor);
+    }
+
+    /// Where the analyser reads what is being played. Silent, rather than
+    /// missing, whenever nothing is playing through the built-in synth.
+    pub fn spectrum(&self) -> &std::sync::Arc<crate::spectrum::SpectrumTap> {
+        &self.spectrum
     }
 
     pub fn outputs(&self) -> Vec<OutputDescriptor> {
@@ -162,17 +175,22 @@ impl OutputManager {
                 OutputDescriptor::Synth(ref font) => {
                     if let Some(ref mut synth) = self.synth_backend {
                         let mic = self.microphone.clone();
+                        let tap = self.spectrum.clone();
                         if let Some(font) = font.clone() {
                             self.output_connection = (
                                 desc,
-                                OutputConnection::Synth(synth.new_output_connection(&font, mic)),
+                                OutputConnection::Synth(
+                                    synth.new_output_connection(&font, mic, tap),
+                                ),
                             );
                         } else if let Some(path) = crate::utils::resources::default_sf2()
                             && path.exists()
                         {
                             self.output_connection = (
                                 desc,
-                                OutputConnection::Synth(synth.new_output_connection(&path, mic)),
+                                OutputConnection::Synth(
+                                    synth.new_output_connection(&path, mic, tap),
+                                ),
                             );
                         }
                     }

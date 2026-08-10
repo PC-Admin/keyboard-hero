@@ -80,6 +80,11 @@ pub struct PlayingScene {
     title_width: f32,
     title_scroll: f32,
 
+    /// Rainbow analyser of the output, tucked under the title. Toggled with V
+    /// and remembered in the config, like the sheet strip above it.
+    spectrum: crate::spectrum::Analyzer,
+    show_spectrum: bool,
+
     top_bar: TopBar,
 
     /// Song ended in play-along mode: show the results screen until the
@@ -219,6 +224,9 @@ impl PlayingScene {
             title,
             title_width,
             title_scroll: 0.0,
+
+            spectrum: crate::spectrum::Analyzer::new(),
+            show_spectrum: ctx.config.spectrum(),
 
             top_bar: TopBar::new(),
 
@@ -611,6 +619,76 @@ impl PlayingScene {
                         .size(text_w, band_h)
                         .build(ui);
                 });
+            }
+
+            // --- spectrum analyser, under the title -----------------------
+            // Hung off the same left edge as the selector and the title, so the
+            // corner reads as one column rather than three things that happen
+            // to be near each other.
+            if self.show_spectrum {
+                let panel_y = band_y + band_h + 6.0;
+
+                self.spectrum
+                    .update(delta.as_secs_f32(), ctx.output_manager.spectrum());
+                self.spectrum.render(
+                    &mut self.quad_renderer_fg,
+                    x0,
+                    panel_y,
+                    band_w,
+                    crate::spectrum::PANEL_HEIGHT,
+                );
+
+                // What is feeding the bars. PIANO follows the output as a whole
+                // and VOICE the microphone's own level, so singing over a
+                // silent piano lights the right one and singing over a played
+                // one lights both — which is the truth about what is in the
+                // mix. Drawn lit or not, because a dark word is the only thing
+                // that explains a still display: an analyser that hears the
+                // output and nothing else looks the same when nobody is playing
+                // as it does when nobody switched the microphone on.
+                let caption_y = panel_y + crate::spectrum::CAPTION_TOP;
+                let playing = self.spectrum.level().clamp(0.0, 1.0);
+
+                nuon::label()
+                    .text("PIANO")
+                    .font_size(10.0)
+                    .color(nuon::Color::new_u8(
+                        (95.0 + 160.0 * playing) as u8,
+                        (85.0 + 137.0 * playing) as u8,
+                        (70.0 + 14.0 * playing) as u8,
+                        1.0,
+                    ))
+                    .text_justify(nuon::TextJustify::Left)
+                    .pos(x0 + 8.0, caption_y)
+                    .size(band_w * 0.5, 12.0)
+                    .build(&mut self.nuon);
+
+                let (voice_text, voice_color) = if ctx.mic_passthrough.is_on() {
+                    let singing = ctx.mic_passthrough.level().clamp(0.0, 1.0);
+                    (
+                        "VOICE",
+                        nuon::Color::new_u8(
+                            (80.0 + 25.0 * singing) as u8,
+                            (88.0 + 107.0 * singing) as u8,
+                            (95.0 + 160.0 * singing) as u8,
+                            1.0,
+                        ),
+                    )
+                } else {
+                    // Nothing sung reaches the output at all with passthrough
+                    // off, so the bars cannot move for it. Said here rather
+                    // than left to be discovered.
+                    ("VOICE OFF", nuon::Color::new_u8(78, 80, 86, 1.0))
+                };
+
+                nuon::label()
+                    .text(voice_text)
+                    .font_size(10.0)
+                    .color(voice_color)
+                    .text_justify(nuon::TextJustify::Right)
+                    .pos(x0 + band_w * 0.5, caption_y)
+                    .size(band_w * 0.5 - 8.0, 12.0)
+                    .build(&mut self.nuon);
             }
         }
 
@@ -1044,6 +1122,16 @@ impl Scene for PlayingScene {
                 "Sheet Music: On"
             } else {
                 "Sheet Music: Off"
+            });
+        }
+
+        if let Some("v" | "V") = event.character_released() {
+            self.show_spectrum = !self.show_spectrum;
+            ctx.config.set_spectrum(self.show_spectrum);
+            self.toast_manager.toast(if self.show_spectrum {
+                "Spectrum: On"
+            } else {
+                "Spectrum: Off"
             });
         }
 

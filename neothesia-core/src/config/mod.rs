@@ -158,6 +158,14 @@ impl Config {
         self.appearance.chord_identifier = chord_identifier;
     }
 
+    pub fn spectrum(&self) -> bool {
+        self.appearance.spectrum
+    }
+
+    pub fn set_spectrum(&mut self, spectrum: bool) {
+        self.appearance.spectrum = spectrum;
+    }
+
     pub fn last_opened_song(&self) -> Option<&PathBuf> {
         self.history.last_opened_song.as_ref()
     }

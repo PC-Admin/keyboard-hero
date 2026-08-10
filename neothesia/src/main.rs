@@ -7,6 +7,7 @@ mod microphone;
 mod output_manager;
 mod scene;
 mod song;
+mod spectrum;
 mod utils;
 
 use std::{sync::Arc, time::Duration};

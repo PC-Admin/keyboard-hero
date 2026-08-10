@@ -73,6 +73,7 @@ impl SynthBackend {
         rx: Receiver<SynthEvent>,
         path: &Path,
         microphone: Option<Arc<crate::microphone::Monitor>>,
+        spectrum: Arc<crate::spectrum::SpectrumTap>,
     ) -> cpal::Stream {
         #[cfg(all(feature = "fluid-synth", not(feature = "oxi-synth")))]
         let mut next_value = fluidsynth_adapter(self, rx, path);
@@ -83,6 +84,10 @@ impl SynthBackend {
         let err_fn = |err| eprintln!("an error occurred on stream: {err}");
 
         let channels = self.stream_config.channels as usize;
+
+        // The analyser draws whatever this stream carries, so it has to know
+        // how fast the samples it is handed were played.
+        spectrum.set_sample_rate(self.stream_config.sample_rate);
 
         let stream = self
             .device
@@ -98,8 +103,16 @@ impl SynthBackend {
                         // costs a load and an add and needs no flag of its own.
                         let mic = microphone.as_ref().map(|m| m.next()).unwrap_or(0.0);
 
-                        let l = T::from_sample(l + mic);
-                        let r = T::from_sample(r + mic);
+                        let (l, r) = (l + mic, r + mic);
+
+                        // Tapped here, after the microphone has been added and
+                        // before anything is quantised: this is the last point
+                        // at which what the speakers will play is still a
+                        // number, and it is the one the analyser draws.
+                        spectrum.push((l + r) * 0.5);
+
+                        let l = T::from_sample(l);
+                        let r = T::from_sample(r);
 
                         let channels = [l, r];
 
@@ -121,22 +134,24 @@ impl SynthBackend {
         &mut self,
         path: &Path,
         microphone: Option<Arc<crate::microphone::Monitor>>,
+        spectrum: Arc<crate::spectrum::SpectrumTap>,
     ) -> SynthOutputConnection {
         let (tx, rx) = std::sync::mpsc::channel::<SynthEvent>();
         let mic = microphone;
+        let tap = spectrum;
         let stream = match self.sample_format {
-            cpal::SampleFormat::I8 => self.run::<i8>(rx, path, mic),
-            cpal::SampleFormat::I16 => self.run::<i16>(rx, path, mic),
-            cpal::SampleFormat::I32 => self.run::<i32>(rx, path, mic),
-            cpal::SampleFormat::I64 => self.run::<i64>(rx, path, mic),
+            cpal::SampleFormat::I8 => self.run::<i8>(rx, path, mic, tap),
+            cpal::SampleFormat::I16 => self.run::<i16>(rx, path, mic, tap),
+            cpal::SampleFormat::I32 => self.run::<i32>(rx, path, mic, tap),
+            cpal::SampleFormat::I64 => self.run::<i64>(rx, path, mic, tap),
 
-            cpal::SampleFormat::U8 => self.run::<u8>(rx, path, mic),
-            cpal::SampleFormat::U16 => self.run::<u16>(rx, path, mic),
-            cpal::SampleFormat::U32 => self.run::<u32>(rx, path, mic),
-            cpal::SampleFormat::U64 => self.run::<u64>(rx, path, mic),
+            cpal::SampleFormat::U8 => self.run::<u8>(rx, path, mic, tap),
+            cpal::SampleFormat::U16 => self.run::<u16>(rx, path, mic, tap),
+            cpal::SampleFormat::U32 => self.run::<u32>(rx, path, mic, tap),
+            cpal::SampleFormat::U64 => self.run::<u64>(rx, path, mic, tap),
 
-            cpal::SampleFormat::F32 => self.run::<f32>(rx, path, mic),
-            cpal::SampleFormat::F64 => self.run::<f64>(rx, path, mic),
+            cpal::SampleFormat::F32 => self.run::<f32>(rx, path, mic, tap),
+            cpal::SampleFormat::F64 => self.run::<f64>(rx, path, mic, tap),
             sample_format => unimplemented!("Unsupported sample format '{sample_format}'"),
         };
 

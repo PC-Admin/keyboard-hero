@@ -83,6 +83,12 @@ keyboard-navigable list right on the main menu — no file browsing.
 the results screen, so the crowd goes wild for an A++ and lets you know about an F. Any format
 [rodio](https://github.com/RustAudio/rodio) can decode works — ogg, mp3, wav, flac.
 
+**Spectrum analyser.** A rainbow of bars in the top-right corner, under the song title, showing
+what is actually coming out of the speakers — the piano, and your voice too when microphone
+passthrough is on, since singing rides out on the same stream. Press **V** to hide it. It reads
+the built-in synth's output, so it stays at rest if you have picked a MIDI device as your output
+instead: those notes go down a cable to an instrument the app never hears.
+
 ## Controls
 
 | Key | Action |
@@ -93,6 +99,7 @@ the results screen, so the crowd goes wild for an A++ and lets you know about an
 | **PgUp / PgDn** | Note scroll speed (hold **Shift** for bigger steps) |
 | **Enter** | Replay the song, on the results screen |
 | **Backspace** | Back to the menu, on the results screen |
+| **V** | Spectrum analyser on / off |
 
 ## What this fork adds
 
@@ -100,7 +107,7 @@ Everything upstream Neothesia does, plus: the HERO/AUTO/HUMAN toggle, Guitar-Her
 (light pillars, bloom sparks, on-fire keyboard), the combo counter and score multiplier, an
 audience sentiment gauge, PERFECT/GOOD timing grades rising out of the struck keys, the
 end-of-song results screen with letter grades, crowd SFX, rainbow note-guide squares with
-letter labels on the keys, and the Favourites list.
+letter labels on the keys, the spectrum analyser, and the Favourites list.
 
 ## Licence
 
