@@ -1017,6 +1017,9 @@ pub struct VoicePlayback {
     /// which is not the same as having been heard — see [`VoicePlayback::pause`].
     cursor: usize,
     playing: bool,
+    /// Frames since playback began, only so the progress line below is emitted
+    /// about once a second rather than sixty times.
+    frames: u32,
 }
 
 /// How many samples to keep queued ahead of the synth.
@@ -1029,6 +1032,7 @@ impl VoicePlayback {
             take,
             cursor: 0,
             playing: false,
+            frames: 0,
         }
     }
 
@@ -1053,6 +1057,22 @@ impl VoicePlayback {
             };
             self.monitor.preview.ring.push(sample);
             self.cursor += 1;
+        }
+
+        // Whether the synth is actually taking these is the question that
+        // separates "the voice is not being played" from "the voice is being
+        // played and cannot be heard", and the two look identical from a chair.
+        // A cursor that climbs means the queue is draining, which means the
+        // samples are reaching the output; one that sticks means it is not.
+        self.frames = self.frames.wrapping_add(1);
+        if self.frames % 60 == 0 {
+            log::info!(
+                "preview voice: {} of {} samples handed over, {} queued, peak {:.3}",
+                self.cursor,
+                self.take.len(),
+                self.monitor.preview.ring.len(),
+                self.take.peak(),
+            );
         }
     }
 
