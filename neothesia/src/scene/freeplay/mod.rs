@@ -199,10 +199,10 @@ impl Scene for FreeplayScene {
 
         self.dispatch_futures(ctx);
 
-        // Before anything that might take a while. The microphone's buffer is
-        // the only place captured samples live until this runs, so the longer a
+        // Before anything that might take a while. The synth's buffer is the
+        // only place recorded samples live until this runs, so the longer a
         // frame leaves it the closer the take comes to losing some.
-        self.recorder.collect_voice(&ctx.mic_passthrough);
+        self.recorder.collect_audio(&ctx.mic_passthrough);
 
         if let Some(preview) = self.preview.as_mut() {
             preview.update(&mut self.keyboard, ctx, delta);

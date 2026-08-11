@@ -13,7 +13,7 @@ use neothesia_core::render::{NoteLabels, WaterfallRenderer};
 use crate::{
     context::Context,
     icons,
-    microphone::{MicPassthrough, VoicePlayback, VoiceTake},
+    microphone::{AudioTake, MicPassthrough, TakePlayback},
     scene::{
         freeplay::{FreeplayScene, on_async},
         playing_scene::{Keyboard, midi_player::MidiPlayer},
@@ -34,36 +34,42 @@ pub enum RecorderError {
     #[error("Failed to write MIDI file")]
     Write,
     #[error("Failed to write WAV file")]
-    WriteVoice,
+    WriteAudio,
     #[error("{0}")]
     MidiFileParse(String),
 }
 
-/// What became of the singing over a take.
+/// What ended up on a take.
 ///
-/// Worth reporting in every case rather than only when it worked: on speakers
-/// you cannot really hear yourself, so "was my voice recorded" is a question
-/// the screen has to answer or nobody finds out until they open the file.
+/// Worth reporting in every case rather than only when it worked. The take is a
+/// mix, so nothing in the file itself can tell a silent microphone from one that
+/// never opened — both leave a recording of piano. Only the screen can say, and
+/// on speakers, where you cannot really hear yourself, it is the only way to
+/// find out before opening the file.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum VoiceOutcome {
-    /// The microphone could not be opened, so the take is piano only.
+pub enum TakeOutcome {
+    /// The playing and the singing, both on it.
+    PianoAndVoice,
+    /// The playing alone: the microphone was open and heard nothing, which
+    /// usually means its dial is all the way down.
+    SilentMicrophone,
+    /// The playing alone: no microphone could be opened.
     NoMicrophone,
-    /// Captured, with something on it.
-    Captured,
-    /// Captured, and silent from end to end — the microphone was open and heard
-    /// nothing, which usually means its dial is all the way down.
-    Silent,
-    /// Captured, but frames ran so slowly that samples were lost on the way.
+    /// Something was lost on the way, so the recording has a gap in it.
     Gapped,
+    /// Nothing was recorded at all, because the output is not the built-in
+    /// synth — there is no mix to tap when the notes are going to a MIDI device.
+    NoAudio,
 }
 
-impl fmt::Display for VoiceOutcome {
+impl fmt::Display for TakeOutcome {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NoMicrophone => write!(f, "no microphone"),
-            Self::Captured => write!(f, "with voice"),
-            Self::Silent => write!(f, "microphone heard nothing"),
-            Self::Gapped => write!(f, "with voice, some samples dropped"),
+            Self::PianoAndVoice => write!(f, "piano and voice"),
+            Self::SilentMicrophone => write!(f, "piano only, microphone heard nothing"),
+            Self::NoMicrophone => write!(f, "piano only, no microphone"),
+            Self::Gapped => write!(f, "piano and voice, some samples dropped"),
+            Self::NoAudio => write!(f, "MIDI only, no audio to record"),
         }
     }
 }
@@ -72,7 +78,7 @@ impl fmt::Display for VoiceOutcome {
 pub enum RecorderStatus {
     #[default]
     Idle,
-    RecordingFinished(Duration, VoiceOutcome),
+    RecordingFinished(Duration, TakeOutcome),
     Saved(String),
     Error(RecorderError),
 }
@@ -81,8 +87,8 @@ impl fmt::Display for RecorderStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Idle => {}
-            Self::RecordingFinished(duration, voice) => {
-                write!(f, "Recorded {:.1}s · {voice}", duration.as_secs_f32())?;
+            Self::RecordingFinished(duration, outcome) => {
+                write!(f, "Recorded {:.1}s · {outcome}", duration.as_secs_f32())?;
             }
             Self::Error(err) => {
                 write!(f, "{err}")?;
@@ -107,12 +113,13 @@ pub struct RecordingInProgressState {
     started_at: Instant,
     events: Vec<RecordedMidiEvent>,
     active_notes: HashSet<(u8, u8)>,
-    /// The singing, swept out of the microphone a frame at a time. Grown here
-    /// rather than in the audio callback, which cannot allocate — see
+    /// The performance as it was heard — piano and singing already summed —
+    /// swept out of the synth's output a frame at a time. Grown here rather
+    /// than in the audio callback, which cannot allocate; see
     /// `microphone::MicPassthrough::collect_recording`.
-    voice: Vec<f32>,
-    /// False when the microphone would not open, so the take can say it is
-    /// piano only rather than leaving somebody to wonder.
+    audio: Vec<f32>,
+    /// False when the microphone would not open. Nothing in the take itself can
+    /// say so, because a take with no singing on it is just a take of piano.
     microphone: bool,
 }
 
@@ -136,19 +143,22 @@ impl RecordingInProgressState {
     }
 }
 
-/// A finished take: the playing, the singing, or both.
+/// A finished take, in the two forms worth keeping: the notes, and the sound.
 ///
-/// Either half may be missing and the take is still worth keeping. Singing over
-/// nothing is a perfectly good recording, and so is playing with the microphone
-/// shut — so neither absence throws the other away, which is what an earlier
-/// shape of this did to anyone who sang without touching a key.
+/// The audio is the performance as it was heard, piano and singing together,
+/// which is the thing you would send somebody. The MIDI is the same playing as
+/// data, which is the thing you would edit. Either may be missing and the take
+/// is still worth keeping — singing over nothing is a perfectly good recording,
+/// and so is playing with the microphone shut — so neither absence throws the
+/// other away, which is what an earlier shape of this did to anyone who sang
+/// without touching a key.
 pub struct RecordedTake {
     duration: Duration,
-    /// Missing when no notes were played. Only the MIDI half can be previewed,
+    /// Missing when no notes were played. Only this half can drive a preview,
     /// because the preview is built around a `Song`.
     smf: Option<Smf<'static>>,
-    voice: Option<Arc<VoiceTake>>,
-    outcome: VoiceOutcome,
+    audio: Option<Arc<AudioTake>>,
+    outcome: TakeOutcome,
 }
 
 #[derive(Default)]
@@ -168,13 +178,15 @@ pub struct Preview {
     player: MidiPlayer,
     waterfall: WaterfallRenderer,
     note_labels: Option<NoteLabels>,
-    /// The singing that went with these notes, played back through the synth's
-    /// own stream so the two arrive together. `None` when the take has no voice.
-    voice: Option<VoicePlayback>,
+    /// The recording these notes came from, played back through the synth's own
+    /// stream. When this is present it is the only thing making a sound: the
+    /// piano is already on it, so the player above is muted and drives nothing
+    /// but the waterfall and the keys.
+    audio: Option<TakePlayback>,
 }
 
 impl Preview {
-    fn new(keyboard: &Keyboard, song: Song, voice: Option<Arc<VoiceTake>>, ctx: &Context) -> Self {
+    fn new(keyboard: &Keyboard, song: Song, audio: Option<Arc<AudioTake>>, ctx: &Context) -> Self {
         let hidden_tracks: Vec<usize> = song
             .config
             .tracks
@@ -198,8 +210,20 @@ impl Preview {
             ctx.text_renderer_factory.new_renderer(),
         ));
 
+        // With a recording of the mix in hand, the notes must not be played
+        // again: the piano is already on it, and sounding the MIDI as well
+        // would lay a second performance over the first, drifting apart as the
+        // two clocks diverge. So the player drives the waterfall and the keys
+        // and sends its notes nowhere, and everything you hear comes off the
+        // recording. Without a recording there is nothing to hear otherwise,
+        // and the synth plays as before.
+        let output = match audio {
+            Some(_) => crate::output_manager::OutputConnection::DummyOutput,
+            None => ctx.output_manager.connection().clone(),
+        };
+
         let mut player = MidiPlayer::new_with_lead_in(
-            ctx.output_manager.connection().clone(),
+            output,
             song,
             keyboard.layout().range.clone(),
             ctx.config.separate_channels(),
@@ -215,7 +239,7 @@ impl Preview {
             player,
             waterfall,
             note_labels,
-            voice: voice.map(|take| VoicePlayback::new(ctx.mic_passthrough.monitor(), take)),
+            audio: audio.map(|take| TakePlayback::new(ctx.mic_passthrough.bus(), take)),
         }
     }
 
@@ -236,10 +260,10 @@ impl Preview {
             self.player.pause();
         }
 
-        // Follows the notes rather than driving them: the voice starts, stops
-        // and seeks with whatever the player is doing.
-        if let Some(voice) = self.voice.as_mut() {
-            voice.update(!self.player.is_paused());
+        // Follows the notes rather than driving them: the recording starts,
+        // stops and seeks with whatever the player is doing.
+        if let Some(audio) = self.audio.as_mut() {
+            audio.update(!self.player.is_paused());
         }
 
         let time = self.player.time_without_lead_in() + ctx.config.animation_offset();
@@ -284,34 +308,35 @@ impl FreeplayRecorder {
             started_at: Instant::now(),
             events: Vec::new(),
             active_notes: HashSet::new(),
-            voice: Vec::new(),
+            audio: Vec::new(),
             microphone,
         });
     }
 
-    /// Sweep the microphone's buffer into the take. Called every frame while
-    /// recording: the capture callback cannot grow a `Vec`, so somebody on this
+    /// Sweep the synth's buffer into the take. Called every frame while
+    /// recording: the audio callback cannot grow a `Vec`, so somebody on this
     /// side has to, and falling behind is what costs samples.
-    pub fn collect_voice(&mut self, mic: &MicPassthrough) {
+    pub fn collect_audio(&mut self, mic: &MicPassthrough) {
         let RecorderState::Recording(in_progress) = &mut self.state else {
             return;
         };
 
-        mic.collect_recording(&mut in_progress.voice);
+        mic.collect_recording(&mut in_progress.audio);
     }
 
     /// Finish the take and keep whatever it has. `Err` means there is nothing
-    /// to preview, not that the take was thrown away — the voice is kept
+    /// to preview, not that the take was thrown away — the recording is kept
     /// either way and can still be saved.
     fn stop(&mut self, mic: &mut MicPassthrough) -> Result<(), RecorderError> {
-        // Last sweep before the device closes, or the tail of the take is left
-        // sitting in a buffer that is about to be dropped.
-        self.collect_voice(mic);
+        // Last sweep before the tape is disarmed, or the tail of the take is
+        // left sitting in a buffer nobody will read again.
+        self.collect_audio(mic);
         let rate = mic.rate();
         let gapped = mic.recording_dropped_samples();
+        let mic_peak = mic.recording_mic_peak();
         mic.stop_recording();
 
-        self.finish(rate, gapped)
+        self.finish(rate, gapped, mic_peak)
     }
 
     /// Walk away from a take in progress, releasing the microphone. What was
@@ -324,7 +349,7 @@ impl FreeplayRecorder {
 
     /// The device-free half of [`FreeplayRecorder::stop`]: turn what was
     /// gathered into a take, whatever it did or did not end up containing.
-    fn finish(&mut self, rate: u32, gapped: bool) -> Result<(), RecorderError> {
+    fn finish(&mut self, rate: u32, gapped: bool, mic_peak: f32) -> Result<(), RecorderError> {
         let state = std::mem::take(&mut self.state);
         let RecorderState::Recording(mut in_progress) = state else {
             return Err(RecorderError::NothingRecorded);
@@ -333,19 +358,28 @@ impl FreeplayRecorder {
         let stop_time = in_progress.started_at.elapsed();
         in_progress.finish_active_notes(stop_time);
 
-        let voice = (!in_progress.voice.is_empty())
-            .then(|| Arc::new(VoiceTake::new(std::mem::take(&mut in_progress.voice), rate)));
+        let audio = (!in_progress.audio.is_empty())
+            .then(|| Arc::new(AudioTake::new(std::mem::take(&mut in_progress.audio), rate)));
 
-        let outcome = match (&voice, in_progress.microphone) {
-            (_, false) => VoiceOutcome::NoMicrophone,
-            (Some(take), _) if take.peak() > 0.0 => {
-                if gapped {
-                    VoiceOutcome::Gapped
-                } else {
-                    VoiceOutcome::Captured
-                }
-            }
-            _ => VoiceOutcome::Silent,
+        // What the microphone did is a separate question from what was
+        // recorded, now that the recording is a mix: a take full of piano is
+        // what both a shut microphone and a silent one leave behind. The peak
+        // is measured before the two are summed, and is the only thing that can
+        // tell them apart. `HEARD` is a floor rather than zero because a live
+        // input is never exactly silent — a mic left open in a quiet room still
+        // sends its own noise, and calling that "voice" is how a take gets
+        // reported as good when nobody sang.
+        const HEARD: f32 = 0.01;
+        let outcome = if audio.is_none() {
+            TakeOutcome::NoAudio
+        } else if !in_progress.microphone {
+            TakeOutcome::NoMicrophone
+        } else if mic_peak < HEARD {
+            TakeOutcome::SilentMicrophone
+        } else if gapped {
+            TakeOutcome::Gapped
+        } else {
+            TakeOutcome::PianoAndVoice
         };
 
         let smf = to_smf(&in_progress.events).ok();
@@ -356,21 +390,22 @@ impl FreeplayRecorder {
         // from the outside: no microphone, a silent one, no samples collected,
         // or a preview that was never built.
         log::info!(
-            "recording: {:.1}s, {} voice samples at {rate} Hz, peak {:.3} ({:.1} dBFS), \
-             rms {:.5} ({:.1} dBFS), {outcome:?}, {} notes to preview",
+            "recording: {:.1}s, {} mix samples at {rate} Hz, peak {:.3} ({:.1} dBFS), \
+             rms {:.5} ({:.1} dBFS), mic peak {mic_peak:.3}, {outcome:?}, \
+             {} notes to preview",
             stop_time.as_secs_f32(),
-            voice.as_ref().map(|take| take.len()).unwrap_or(0),
-            voice.as_ref().map(|take| take.peak()).unwrap_or(0.0),
-            dbfs(voice.as_ref().map(|take| take.peak()).unwrap_or(0.0)),
-            voice.as_ref().map(|take| take.rms()).unwrap_or(0.0),
-            dbfs(voice.as_ref().map(|take| take.rms()).unwrap_or(0.0)),
+            audio.as_ref().map(|take| take.len()).unwrap_or(0),
+            audio.as_ref().map(|take| take.peak()).unwrap_or(0.0),
+            dbfs(audio.as_ref().map(|take| take.peak()).unwrap_or(0.0)),
+            audio.as_ref().map(|take| take.rms()).unwrap_or(0.0),
+            dbfs(audio.as_ref().map(|take| take.rms()).unwrap_or(0.0)),
             if previewable { "some" } else { "no" },
         );
 
         self.state = RecorderState::Recorded(RecordedTake {
             duration: stop_time,
             smf,
-            voice,
+            audio,
             outcome,
         });
 
@@ -423,7 +458,7 @@ impl FreeplayRecorder {
     /// Whether there is anything a save would write.
     fn has_something_to_save(&self) -> bool {
         self.recorded()
-            .is_some_and(|take| take.smf.is_some() || take.voice.is_some())
+            .is_some_and(|take| take.smf.is_some() || take.audio.is_some())
     }
 }
 
@@ -694,8 +729,9 @@ fn handle_record_click(scene: &mut FreeplayScene, ctx: &mut Context) {
     scene.keyboard.set_song_config(Default::default());
     scene.keyboard.reset_notes();
 
-    // Dropped before the next take starts, so the previous take's voice is not
-    // still queued to play while the new one is being sung.
+    // Dropped before the next take starts, so the previous take is not still
+    // queued to play — and, more to the point, not still being recorded into
+    // the new one.
     scene.preview = None;
     scene.recorder_status = RecorderStatus::default();
     scene.recorder.start(&mut ctx.mic_passthrough);
@@ -708,10 +744,10 @@ fn handle_save_click(scene: &mut FreeplayScene, ctx: &Context) {
     };
 
     let smf = take.smf.clone();
-    let voice = take.voice.clone();
+    let audio = take.audio.clone();
 
     // The dialog names whichever half exists; when both do, the notes are what
-    // gets picked and the voice lands beside it under the same name. One
+    // gets picked and the recording lands beside it under the same name. One
     // choice, two files, and a pair that stay together on disk.
     let mut dialog = rfd::AsyncFileDialog::new();
     dialog = if smf.is_some() {
@@ -747,10 +783,10 @@ fn handle_save_click(scene: &mut FreeplayScene, ctx: &Context) {
                 written.push(file_name(&path));
             }
 
-            if let Some(voice) = voice {
+            if let Some(audio) = audio {
                 let wav = path.with_extension("wav");
-                if voice.write_wav(&wav).is_err() {
-                    state.recorder_status = RecorderStatus::Error(RecorderError::WriteVoice);
+                if audio.write_wav(&wav).is_err() {
+                    state.recorder_status = RecorderStatus::Error(RecorderError::WriteAudio);
                     return;
                 }
                 written.push(file_name(&wav));
@@ -777,14 +813,14 @@ fn file_name(path: &std::path::Path) -> String {
 fn stop_recording(
     scene: &mut FreeplayScene,
     ctx: &mut Context,
-) -> Result<VoiceOutcome, RecorderError> {
+) -> Result<TakeOutcome, RecorderError> {
     scene.recorder.stop(&mut ctx.mic_passthrough)?;
 
     let Some(take) = scene.recorder.recorded() else {
         return Err(RecorderError::NothingRecorded);
     };
     let outcome = take.outcome;
-    let voice = take.voice.clone();
+    let audio = take.audio.clone();
     let smf = take.smf.clone().ok_or(RecorderError::NoNotesFound)?;
 
     let midi = midi_file::MidiFile::from_smf("freeplay-recording.mid", &smf)
@@ -795,7 +831,7 @@ fn stop_recording(
     scene.keyboard.set_song_config(song.config.clone());
     scene.keyboard.reset_notes();
 
-    scene.preview = Some(Preview::new(&scene.keyboard, song, voice, ctx));
+    scene.preview = Some(Preview::new(&scene.keyboard, song, audio, ctx));
 
     Ok(outcome)
 }
@@ -810,10 +846,10 @@ fn seek_preview_to_cursor(scene: &mut FreeplayScene, ctx: &Context) {
 
     preview.player.set_percentage_time(percentage);
     // Sent the same fraction rather than the same timestamp: the take runs from
-    // the first key to the last and the voice from the click of record to the
-    // click of stop, so the two are the same length only by coincidence.
-    if let Some(voice) = preview.voice.as_mut() {
-        voice.seek(percentage);
+    // the first key to the last and the recording from the click of record to
+    // the click of stop, so the two are the same length only by coincidence.
+    if let Some(audio) = preview.audio.as_mut() {
+        audio.seek(percentage);
     }
     scene.keyboard.reset_notes();
 }
@@ -881,6 +917,11 @@ mod freeplay_recorder_tests {
     use super::*;
 
     const RATE: u32 = 48_000;
+    /// A microphone peak that counts as somebody having sung.
+    const MIC_HEARD: f32 = 0.4;
+    /// One that does not: an open input in a quiet room, which is never exactly
+    /// zero and must not be reported as a voice.
+    const MIC_SILENT: f32 = 0.001;
 
     /// A recorder mid-take, with the microphone said to be open but nothing
     /// captured yet. `begin`/`finish` are used throughout rather than
@@ -901,12 +942,12 @@ mod freeplay_recorder_tests {
         );
     }
 
-    /// Stand in for what the frame loop sweeps out of the microphone.
-    fn sing(recorder: &mut FreeplayRecorder, samples: &[f32]) {
+    /// Stand in for what the frame loop sweeps out of the synth's output.
+    fn play(recorder: &mut FreeplayRecorder, samples: &[f32]) {
         let RecorderState::Recording(in_progress) = &mut recorder.state else {
             panic!("not recording");
         };
-        in_progress.voice.extend_from_slice(samples);
+        in_progress.audio.extend_from_slice(samples);
     }
 
     #[test]
@@ -914,13 +955,13 @@ mod freeplay_recorder_tests {
         let mut recorder = recording(false);
         note_on(&mut recorder);
 
-        assert!(recorder.finish(RATE, false).is_ok());
+        assert!(recorder.finish(RATE, false, MIC_HEARD).is_ok());
 
         recorder.begin(false);
 
         assert!(recorder.is_recording());
 
-        let error = recorder.finish(RATE, false).expect_err("Empty");
+        let error = recorder.finish(RATE, false, MIC_HEARD).expect_err("Empty");
         assert_eq!(error, RecorderError::NoNotesFound);
     }
 
@@ -944,7 +985,7 @@ mod freeplay_recorder_tests {
         );
 
         let error = recorder
-            .finish(RATE, false)
+            .finish(RATE, false, MIC_HEARD)
             .expect_err("pedal-only recordings should not create preview songs");
         assert_eq!(error, RecorderError::NoNotesFound);
     }
@@ -962,7 +1003,7 @@ mod freeplay_recorder_tests {
         );
 
         let error = recorder
-            .finish(RATE, false)
+            .finish(RATE, false, MIC_HEARD)
             .expect_err("note-off-only recordings should not create preview songs");
         assert_eq!(error, RecorderError::NoNotesFound);
     }
@@ -970,34 +1011,39 @@ mod freeplay_recorder_tests {
     #[test]
     fn singing_over_no_notes_is_still_a_take_worth_keeping() {
         // No preview, because a preview is built around a song and there is no
-        // song here. But the singing happened and must survive to be saved:
+        // song here. But the recording happened and must survive to be saved:
         // throwing it away for want of a keypress is how you lose a take.
         let mut recorder = recording(true);
-        sing(&mut recorder, &[0.4; 1000]);
+        play(&mut recorder, &[0.4; 1000]);
 
         assert_eq!(
-            recorder.finish(RATE, false).expect_err("no notes"),
+            recorder
+                .finish(RATE, false, MIC_HEARD)
+                .expect_err("no notes"),
             RecorderError::NoNotesFound
         );
 
         let take = recorder.recorded().expect("the take was thrown away");
         assert!(take.smf.is_none());
-        assert!(take.voice.is_some());
-        assert_eq!(take.outcome, VoiceOutcome::Captured);
+        assert!(take.audio.is_some());
+        assert_eq!(take.outcome, TakeOutcome::PianoAndVoice);
         assert!(recorder.has_something_to_save());
     }
 
     #[test]
-    fn playing_with_no_microphone_is_still_a_take_worth_keeping() {
+    fn playing_with_no_microphone_still_records_the_piano() {
+        // The take is the synth's own output, so it has the playing on it
+        // whether or not anything was sung over the top.
         let mut recorder = recording(false);
         note_on(&mut recorder);
+        play(&mut recorder, &[0.4; 1000]);
 
-        assert!(recorder.finish(RATE, false).is_ok());
+        assert!(recorder.finish(RATE, false, 0.0).is_ok());
 
         let take = recorder.recorded().expect("the take was thrown away");
         assert!(take.smf.is_some());
-        assert!(take.voice.is_none());
-        assert_eq!(take.outcome, VoiceOutcome::NoMicrophone);
+        assert!(take.audio.is_some(), "the playing was not recorded");
+        assert_eq!(take.outcome, TakeOutcome::NoMicrophone);
         assert!(recorder.has_something_to_save());
     }
 
@@ -1005,16 +1051,17 @@ mod freeplay_recorder_tests {
     fn an_open_microphone_that_heard_nothing_says_so() {
         // Distinct from having no microphone at all, and the distinction is the
         // useful one: this is a dial turned all the way down, which the player
-        // can fix, rather than a device that would not open.
+        // can fix, rather than a device that would not open. Neither can be read
+        // off the take itself — both leave a recording of piano.
         let mut recorder = recording(true);
         note_on(&mut recorder);
-        sing(&mut recorder, &[0.0; 1000]);
+        play(&mut recorder, &[0.4; 1000]);
 
-        assert!(recorder.finish(RATE, false).is_ok());
+        assert!(recorder.finish(RATE, false, MIC_SILENT).is_ok());
         assert_eq!(
             recorder.recorded().unwrap().outcome,
-            VoiceOutcome::Silent,
-            "silence was reported as a good take"
+            TakeOutcome::SilentMicrophone,
+            "a room's worth of noise was reported as singing"
         );
     }
 
@@ -1022,17 +1069,32 @@ mod freeplay_recorder_tests {
     fn a_take_with_a_hole_in_it_is_not_passed_off_as_a_clean_one() {
         let mut recorder = recording(true);
         note_on(&mut recorder);
-        sing(&mut recorder, &[0.4; 1000]);
+        play(&mut recorder, &[0.4; 1000]);
 
-        assert!(recorder.finish(RATE, true).is_ok());
-        assert_eq!(recorder.recorded().unwrap().outcome, VoiceOutcome::Gapped);
+        assert!(recorder.finish(RATE, true, MIC_HEARD).is_ok());
+        assert_eq!(recorder.recorded().unwrap().outcome, TakeOutcome::Gapped);
+    }
+
+    #[test]
+    fn notes_going_somewhere_other_than_the_synth_leave_no_audio() {
+        // A MIDI device sounds the notes itself, so there is no mix here to tap
+        // and nothing to write to a WAV. The MIDI is still worth keeping.
+        let mut recorder = recording(false);
+        note_on(&mut recorder);
+
+        assert!(recorder.finish(RATE, false, 0.0).is_ok());
+
+        let take = recorder.recorded().unwrap();
+        assert!(take.audio.is_none());
+        assert_eq!(take.outcome, TakeOutcome::NoAudio);
+        assert!(recorder.has_something_to_save());
     }
 
     #[test]
     fn nothing_at_all_leaves_nothing_to_save() {
         let mut recorder = recording(true);
 
-        assert!(recorder.finish(RATE, false).is_err());
+        assert!(recorder.finish(RATE, false, 0.0).is_err());
         assert!(!recorder.has_something_to_save());
     }
 
@@ -1042,10 +1104,10 @@ mod freeplay_recorder_tests {
         // back at the wrong pitch, which is the sort of thing nobody notices
         // until they open it somewhere else.
         let mut recorder = recording(true);
-        sing(&mut recorder, &[0.5; 44_100]);
-        let _ = recorder.finish(44_100, false);
+        play(&mut recorder, &[0.5; 44_100]);
+        let _ = recorder.finish(44_100, false, MIC_HEARD);
 
-        let voice = recorder.recorded().unwrap().voice.clone().unwrap();
+        let voice = recorder.recorded().unwrap().audio.clone().unwrap();
         let wav = voice.wav_bytes();
         assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()), 44_100);
     }

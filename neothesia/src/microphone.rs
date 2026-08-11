@@ -1,14 +1,24 @@
 //! The microphone: what it hears mixed into the piano so you can sing along,
-//! and kept so freeplay can record you doing it.
+//! and the finished mix kept so freeplay can record the performance.
 //!
-//! One capture stream serves both, and every sample goes to both — a recording
-//! is the audio that went to the speakers rather than a separately processed
-//! second version of it, so there is only ever one answer to why a file does
-//! not sound like the room. Either half can want the device on its own: you can
-//! monitor without recording, and record without monitoring, which is the
-//! useful combination on speakers where hearing yourself is not really on offer
-//! anyway. The stream opens when the first of them asks and closes when the
-//! last stops asking, decided in one place — see [`MicPassthrough::sync_device`].
+//! [`AudioBus`] is the whole arrangement, and it runs both ways through the
+//! synth's audio callback. On the way in it supplies the microphone sample to
+//! add; on the way out it takes back the frame the synth produced, piano and
+//! singing already summed. A recording is therefore the performance exactly as
+//! the speakers got it — not a separately captured second version of one half
+//! of it — so there is nothing to line back up afterwards and no way for the
+//! file to disagree with the room.
+//!
+//! That the recording comes from the output rather than the microphone has one
+//! consequence worth stating: it only exists while the built-in synth is the
+//! output. Send the notes to a MIDI device and there is no mix here to tap, and
+//! a take keeps its MIDI and nothing else.
+//!
+//! The microphone can be wanted for either job independently — monitoring
+//! without recording, or recording without monitoring, which is the useful
+//! combination on speakers where hearing yourself is not really on offer
+//! anyway. The device opens when the first of them asks and closes when the
+//! last stops asking, decided in one place: see [`MicPassthrough::sync_device`].
 //!
 //! The passthrough half hands samples to the synth, which adds them to its own
 //! output. It does **not** open a speaker stream of its own, and that is the
@@ -49,6 +59,12 @@
 //! queue at exactly the rate it plays, so topping it up once a frame delivers
 //! samples at exactly the rate they should be heard, however irregular the
 //! frames are.
+//!
+//! One thing the recording cannot tell you, because it is a mix: whether the
+//! singing made it in. A take full of piano is what a shut microphone and a
+//! silent one both leave behind. So the microphone's own peak is measured on
+//! the way past, before the two are summed, purely so the screen can answer
+//! "was I heard" — see [`Tape::note_microphone`].
 //!
 //! The microphone's own dial sets how much signal arrives, as it should; there
 //! is a fixed [`MAKEUP_GAIN`] stage on top to bring a voice up to where the
@@ -297,29 +313,32 @@ impl Source {
 /// One of these lives for the whole session and is shared with whatever output
 /// stream the synth currently has, so switching soundfont or output device does
 /// not need to know anything about microphones. It yields silence whenever
-/// there is nothing to add, which is what makes [`Monitor::next`] safe to call
+/// there is nothing to add, which is what makes [`AudioBus::next`] safe to call
 /// unconditionally from the audio callback — no branch, no flag to check.
 ///
 /// Two things can want to be heard, and they are summed rather than switched
 /// between: the microphone as it is heard now, and a recorded take being played
 /// back. Usually only one is running. Both at once is singing along with your
 /// own take, which is a reasonable thing to want and costs nothing to allow.
-pub struct Monitor {
+pub struct AudioBus {
     /// Fed by the capture callback while passthrough is switched on.
     live: Source,
     /// Whether the live half is wanted. The microphone may be open purely to
     /// record, in which case it is captured and kept but not heard.
     monitoring: std::sync::atomic::AtomicBool,
-    /// Fed a frame at a time by [`VoicePlayback`], replaying a finished take.
+    /// Fed a frame at a time by [`TakePlayback`], replaying a finished take.
     preview: Source,
+    /// Where the finished mix goes on its way to a file.
+    tape: Tape,
 }
 
-impl Monitor {
+impl AudioBus {
     fn new() -> Self {
         Self {
             live: Source::new(RING_CAPACITY, MAX_FILL),
             monitoring: std::sync::atomic::AtomicBool::new(false),
             preview: Source::new(PREVIEW_CAPACITY, PREVIEW_CAPACITY),
+            tape: Tape::new(),
         }
     }
 
@@ -327,6 +346,17 @@ impl Monitor {
     /// nothing to add. Called once per frame from the synth's audio callback.
     pub fn next(&self) -> f32 {
         self.live.next() + self.preview.next()
+    }
+
+    /// Keep a finished frame of the synth's output. Called once per frame from
+    /// the same callback, with the piano and the microphone already summed —
+    /// which is the point. A recording taken from here is the performance as it
+    /// was heard rather than one half of it, so there is nothing to line back up
+    /// afterwards and no way for the file to disagree with the room.
+    ///
+    /// A no-op unless a take is being recorded.
+    pub fn record(&self, sample: f32) {
+        self.tape.push(sample);
     }
 
     /// Capture side. A no-op unless passthrough is switched on, so recording
@@ -347,12 +377,12 @@ impl Monitor {
     }
 }
 
-/// Where a recording accumulates between the capture callback, which cannot
-/// allocate, and the frame loop, which can.
+/// Where a recording accumulates between the synth's audio callback, which
+/// cannot allocate, and the frame loop, which can.
 ///
-/// The callback pushes into the ring; the frame loop empties it into a `Vec`
-/// once a frame. Disarmed it is inert, so the microphone can be open purely for
-/// monitoring without quietly filling a buffer nobody is going to read.
+/// The callback pushes the finished mix into the ring; the frame loop empties it
+/// into a `Vec` once a frame. Disarmed it is inert, so the synth can play for an
+/// hour without quietly filling a buffer nobody is going to read.
 struct Tape {
     ring: Ring,
     armed: std::sync::atomic::AtomicBool,
@@ -360,6 +390,14 @@ struct Tape {
     /// means the take has a gap in it. Worth saying rather than handing over a
     /// file with a hole and no explanation.
     dropped: std::sync::atomic::AtomicBool,
+    /// The loudest the microphone itself went while this take was running, as
+    /// f32 bits.
+    ///
+    /// The take is a mix, so nothing in it can say whether the singing made it
+    /// in — a take full of piano looks exactly like a take full of piano and
+    /// voice until you listen. This is measured on the way past, before the two
+    /// are summed, purely so the screen can answer "was I heard".
+    mic_peak: AtomicU32,
 }
 
 impl Tape {
@@ -368,6 +406,7 @@ impl Tape {
             ring: Ring::new(TAPE_CAPACITY, TAPE_CAPACITY),
             armed: std::sync::atomic::AtomicBool::new(false),
             dropped: std::sync::atomic::AtomicBool::new(false),
+            mic_peak: AtomicU32::new(0),
         }
     }
 
@@ -375,18 +414,33 @@ impl Tape {
         self.armed.load(Ordering::Relaxed)
     }
 
-    /// Capture side, called for every sample whether armed or not.
+    /// Synth side, called for every frame whether armed or not.
     fn push(&self, sample: f32) {
         if self.is_armed() && !self.ring.push(sample) {
             self.dropped.store(true, Ordering::Relaxed);
         }
     }
 
+    /// Capture side: how loud the microphone was in this callback. Only kept
+    /// while a take is running, so it always describes that take.
+    fn note_microphone(&self, peak: f32) {
+        if !self.is_armed() {
+            return;
+        }
+
+        let previous = f32::from_bits(self.mic_peak.load(Ordering::Relaxed));
+        if peak > previous {
+            self.mic_peak.store(peak.to_bits(), Ordering::Relaxed);
+        }
+    }
+
     /// Start a fresh take. Cleared before arming, so nothing left from the last
-    /// one lands at the front of this one.
+    /// one lands at the front of this one, and so the clear cannot race the
+    /// writer — while disarmed, nothing is pushing.
     fn arm(&self) {
         self.ring.clear();
         self.dropped.store(false, Ordering::Relaxed);
+        self.mic_peak.store(0, Ordering::Relaxed);
         self.armed.store(true, Ordering::Relaxed);
     }
 
@@ -481,9 +535,7 @@ pub struct MicPassthrough {
     /// Where captured samples go to be heard. Handed to the synth once at
     /// startup and shared for the rest of the session, so nothing downstream
     /// has to be rebuilt when passthrough is toggled — it simply stops feeding.
-    monitor: Arc<Monitor>,
-    /// Where captured samples go to be kept.
-    tape: Arc<Tape>,
+    bus: Arc<AudioBus>,
     /// Whether the player has asked to hear themselves. Kept apart from whether
     /// the device is open, which recording also has a say in.
     passthrough: bool,
@@ -502,8 +554,7 @@ impl Default for MicPassthrough {
         Self {
             devices: None,
             live: None,
-            monitor: Arc::new(Monitor::new()),
-            tape: Arc::new(Tape::new()),
+            bus: Arc::new(AudioBus::new()),
             passthrough: false,
             rate: 48_000,
             error: None,
@@ -518,10 +569,11 @@ impl MicPassthrough {
         self.passthrough
     }
 
-    /// The shared queue the synth adds to its output. Handed over once, at
-    /// startup, and valid whether or not passthrough is ever switched on.
-    pub fn monitor(&self) -> Arc<Monitor> {
-        Arc::clone(&self.monitor)
+    /// The synth's two-way connection to this: where it picks the microphone up,
+    /// and where it hands its finished mix back to be recorded. Handed over once,
+    /// at startup, and valid whether or not passthrough is ever switched on.
+    pub fn bus(&self) -> Arc<AudioBus> {
+        Arc::clone(&self.bus)
     }
 
     /// Set when opening the device failed, cleared by anything that succeeds.
@@ -554,58 +606,71 @@ impl MicPassthrough {
 
     pub fn toggle(&mut self) {
         self.passthrough = !self.passthrough;
-        self.monitor.set_monitoring(self.passthrough);
+        self.bus.set_monitoring(self.passthrough);
         self.sync_device();
     }
 
     /// Whether the microphone is open and feeding a take.
     pub fn is_recording(&self) -> bool {
-        self.tape.is_armed() && self.live.is_some()
+        self.bus.tape.is_armed() && self.live.is_some()
     }
 
-    /// Start keeping what the microphone hears. Returns false if the device
-    /// could not be opened, which the caller should say out loud — a take that
-    /// silently has no voice in it is worse than one that says why.
+    /// Start keeping the synth's output, and open the microphone so singing
+    /// lands in it too.
+    ///
+    /// Returns whether the microphone opened. A take is worth recording either
+    /// way — without one it is the playing alone, which is a perfectly good
+    /// thing to want — so a microphone that will not open does not stop the
+    /// recording, it only changes what ends up on it.
     pub fn start_recording(&mut self) -> bool {
-        self.tape.arm();
+        self.bus.tape.arm();
         self.sync_device();
 
-        if self.live.is_none() {
-            self.tape.disarm();
+        let microphone = self.live.is_some();
+        if microphone {
+            log::info!("recording: mix at {} Hz, microphone open", self.rate);
+        } else {
             log::warn!("recording: no microphone, this take will be piano only");
-            return false;
         }
 
-        log::info!("recording: capturing at {} Hz", self.rate);
-        true
+        microphone
     }
 
-    /// Stop keeping it, and release the device unless passthrough still wants
-    /// it. Anything captured but not yet collected is left in the tape for one
-    /// last [`MicPassthrough::collect_recording`].
+    /// Stop keeping it, and release the microphone unless passthrough still
+    /// wants it. Anything captured but not yet collected is left in the tape
+    /// for one last [`MicPassthrough::collect_recording`].
     pub fn stop_recording(&mut self) {
-        self.tape.disarm();
+        self.bus.tape.disarm();
         self.sync_device();
     }
 
-    /// Move whatever the microphone has captured since last time onto the end
-    /// of `out`. Called once a frame while recording, and once more on the way
-    /// out to sweep up the tail.
+    /// Move whatever the synth has played since last time onto the end of
+    /// `out`. Called once a frame while recording, and once more on the way out
+    /// to sweep up the tail.
     pub fn collect_recording(&self, out: &mut Vec<f32>) {
-        self.tape.collect(out);
+        self.bus.tape.collect(out);
     }
 
     /// Whether the frame loop ever fell so far behind that the take has a gap
     /// in it.
     pub fn recording_dropped_samples(&self) -> bool {
-        self.tape.dropped.load(Ordering::Relaxed)
+        self.bus.tape.dropped.load(Ordering::Relaxed)
+    }
+
+    /// The loudest the microphone itself went during the take just recorded.
+    ///
+    /// The take is a mix, so nothing in it can distinguish a silent microphone
+    /// from one that was never open — both leave a file of piano. This is the
+    /// only thing that can answer "did it hear me".
+    pub fn recording_mic_peak(&self) -> f32 {
+        f32::from_bits(self.bus.tape.mic_peak.load(Ordering::Relaxed))
     }
 
     /// Open or close the device to match what is currently being asked of it.
     /// Every path that changes either reason to want it ends here, so there is
     /// one place that decides and no way for the two to disagree.
     fn sync_device(&mut self) {
-        let wanted = self.passthrough || self.tape.is_armed();
+        let wanted = self.passthrough || self.bus.tape.is_armed();
 
         match (wanted, self.live.is_some()) {
             (true, false) => self.open(),
@@ -613,7 +678,7 @@ impl MicPassthrough {
                 // Dropped first: this joins the capture thread, so nothing is
                 // still writing by the time the queues are emptied.
                 self.live = None;
-                self.monitor.live.reset();
+                self.bus.live.reset();
                 self.error = None;
             }
             _ => {}
@@ -635,7 +700,7 @@ impl MicPassthrough {
         let devices = self.devices.as_ref().expect("just opened above");
         self.rate = devices.synth_rate();
 
-        match open_capture(devices, Arc::clone(&self.monitor), Arc::clone(&self.tape)) {
+        match open_capture(devices, Arc::clone(&self.bus)) {
             Ok(live) => {
                 self.live = Some(live);
                 self.error = None;
@@ -649,7 +714,7 @@ impl MicPassthrough {
 }
 
 /// Open the microphone and start feeding the monitor and the tape.
-fn open_capture(devices: &Devices, monitor: Arc<Monitor>, tape: Arc<Tape>) -> Result<Live, String> {
+fn open_capture(devices: &Devices, bus: Arc<AudioBus>) -> Result<Live, String> {
     let capture_device = &devices.capture;
 
     let capture_supported = capture_device
@@ -681,7 +746,7 @@ fn open_capture(devices: &Devices, monitor: Arc<Monitor>, tape: Arc<Tape>) -> Re
         capture_device,
         capture_config,
         capture_format,
-        Sinks { monitor, tape },
+        bus,
         Arc::clone(&level),
         capture_rate,
         synth_rate,
@@ -712,35 +777,19 @@ fn stream_config(supported: cpal::SupportedStreamConfig) -> cpal::StreamConfig {
     config
 }
 
-/// Everything one captured sample is handed to. Both take it after the gain and
-/// the limiter, so a recording is exactly what was heard rather than a second
-/// version of it processed differently — one signal path, one answer to "why
-/// does the file not sound like the room".
-struct Sinks {
-    monitor: Arc<Monitor>,
-    tape: Arc<Tape>,
-}
-
-impl Sinks {
-    fn push(&self, sample: f32) {
-        self.monitor.push_live(sample);
-        self.tape.push(sample);
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn capture_stream(
     device: &cpal::Device,
     config: cpal::StreamConfig,
     format: cpal::SampleFormat,
-    sinks: Sinks,
+    bus: Arc<AudioBus>,
     level: Arc<AtomicU32>,
     capture_rate: u32,
     synth_rate: u32,
 ) -> Result<cpal::Stream, String> {
     macro_rules! build {
         ($t:ty) => {
-            build_capture::<$t>(device, config, sinks, level, capture_rate, synth_rate)
+            build_capture::<$t>(device, config, bus, level, capture_rate, synth_rate)
                 .map_err(|err| err.to_string())
         };
     }
@@ -763,7 +812,7 @@ fn capture_stream(
 fn build_capture<T>(
     device: &cpal::Device,
     config: cpal::StreamConfig,
-    sinks: Sinks,
+    bus: Arc<AudioBus>,
     level: Arc<AtomicU32>,
     capture_rate: u32,
     synth_rate: u32,
@@ -816,13 +865,18 @@ where
                     sample
                 };
 
-                resampler.feed(sample, |sample| sinks.push(sample));
+                resampler.feed(sample, |sample| bus.push_live(sample));
             }
 
             // Nothing else writes this, so a plain read-modify-write is safe;
             // the menu only ever reads it.
             let previous = f32::from_bits(level.load(Ordering::Relaxed)) * METER_DECAY;
             level.store(peak.max(previous).to_bits(), Ordering::Relaxed);
+
+            // Undecayed, and only while a take is running: the meter above is
+            // for watching, this is for the one sentence at the end that says
+            // whether the microphone was heard at all.
+            bus.tape.note_microphone(peak);
         },
         |err| log::warn!("microphone capture: {err}"),
         None,
@@ -916,18 +970,18 @@ pub fn level_fraction(peak: f32) -> f32 {
     ((db - METER_FLOOR_DB) / -METER_FLOOR_DB).clamp(0.0, 1.0)
 }
 
-/// A finished recording of the microphone: mono samples at [`VoiceTake::rate`].
+/// A finished recording of the microphone: mono samples at [`AudioTake::rate`].
 ///
 /// Mono because that is what the microphone is — one voice, folded down on the
 /// way in — and holding two copies of it would only make the file twice the
 /// size. The samples are the ones that went to the speakers, gain and limiter
 /// included.
-pub struct VoiceTake {
+pub struct AudioTake {
     samples: Vec<f32>,
     rate: u32,
 }
 
-impl VoiceTake {
+impl AudioTake {
     pub fn new(samples: Vec<f32>, rate: u32) -> Self {
         Self {
             samples,
@@ -942,7 +996,7 @@ impl VoiceTake {
 
     /// The average level across the take, as an amplitude.
     ///
-    /// The number [`VoiceTake::peak`] cannot give: ten seconds of singing and
+    /// The number [`AudioTake::peak`] cannot give: ten seconds of singing and
     /// ten seconds of silence with one click in it have the same peak and
     /// nothing else in common. This is what says whether there is a performance
     /// in here or just a spike.
@@ -974,7 +1028,7 @@ impl VoiceTake {
         std::fs::write(path, self.wav_bytes())
     }
 
-    /// The file [`VoiceTake::write_wav`] writes, as bytes.
+    /// The file [`AudioTake::write_wav`] writes, as bytes.
     pub(crate) fn wav_bytes(&self) -> Vec<u8> {
         const HEADER_LEN: usize = 44;
         const BYTES_PER_SAMPLE: u32 = 2;
@@ -1025,11 +1079,11 @@ impl VoiceTake {
 /// MIDI beside it: that is advanced by frame time and this by the audio device.
 /// Over a take of any normal length the two stay together well enough to listen
 /// to, and seeking puts them back in step.
-pub struct VoicePlayback {
-    monitor: Arc<Monitor>,
-    take: Arc<VoiceTake>,
+pub struct TakePlayback {
+    bus: Arc<AudioBus>,
+    take: Arc<AudioTake>,
     /// The next sample to hand over. Everything before it has been queued,
-    /// which is not the same as having been heard — see [`VoicePlayback::pause`].
+    /// which is not the same as having been heard — see [`TakePlayback::pause`].
     cursor: usize,
     playing: bool,
     /// Frames since playback began, only so the progress line below is emitted
@@ -1040,10 +1094,10 @@ pub struct VoicePlayback {
 /// How many samples to keep queued ahead of the synth.
 const PREVIEW_FILL: usize = 2048;
 
-impl VoicePlayback {
-    pub fn new(monitor: Arc<Monitor>, take: Arc<VoiceTake>) -> Self {
+impl TakePlayback {
+    pub fn new(bus: Arc<AudioBus>, take: Arc<AudioTake>) -> Self {
         Self {
-            monitor,
+            bus,
             take,
             cursor: 0,
             playing: false,
@@ -1066,26 +1120,27 @@ impl VoicePlayback {
             return;
         }
 
-        while self.monitor.preview.ring.len() < PREVIEW_FILL {
+        while self.bus.preview.ring.len() < PREVIEW_FILL {
             let Some(&sample) = self.take.samples.get(self.cursor) else {
                 break;
             };
-            self.monitor.preview.ring.push(sample);
+            self.bus.preview.ring.push(sample);
             self.cursor += 1;
         }
 
         // Whether the synth is actually taking these is the question that
-        // separates "the voice is not being played" from "the voice is being
-        // played and cannot be heard", and the two look identical from a chair.
-        // A cursor that climbs means the queue is draining, which means the
-        // samples are reaching the output; one that sticks means it is not.
+        // separates "the recording is not being played" from "the recording is
+        // being played and cannot be heard", and the two look identical from a
+        // chair. A cursor that climbs at the sample rate means the queue is
+        // draining, which means the samples are reaching the output; one that
+        // sticks means it is not.
         self.frames = self.frames.wrapping_add(1);
-        if self.frames % 60 == 0 {
+        if self.frames.is_multiple_of(60) {
             log::info!(
-                "preview voice: {} of {} samples handed over, {} queued, peak {:.3}",
+                "preview: {} of {} samples handed over, {} queued, peak {:.3}",
                 self.cursor,
                 self.take.len(),
-                self.monitor.preview.ring.len(),
+                self.bus.preview.ring.len(),
                 self.take.peak(),
             );
         }
@@ -1096,21 +1151,21 @@ impl VoicePlayback {
     /// past it.
     fn pause(&mut self) {
         self.playing = false;
-        self.cursor = self.cursor.saturating_sub(self.monitor.preview.reset());
+        self.cursor = self.cursor.saturating_sub(self.bus.preview.reset());
     }
 
     /// Jump to a fraction of the way through, discarding whatever was queued.
     pub fn seek(&mut self, fraction: f32) {
-        self.monitor.preview.reset();
+        self.bus.preview.reset();
         self.cursor = (fraction.clamp(0.0, 1.0) as f64 * self.take.samples.len() as f64) as usize;
     }
 }
 
-impl Drop for VoicePlayback {
+impl Drop for TakePlayback {
     /// Leaving the preview must not leave a second of somebody's voice queued to
     /// play into whatever comes next.
     fn drop(&mut self) {
-        self.monitor.preview.reset();
+        self.bus.preview.reset();
     }
 }
 
@@ -1226,8 +1281,8 @@ mod tests {
 
     /// A monitor with its live half switched on, which is what passthrough
     /// being on amounts to.
-    fn monitoring() -> Monitor {
-        let monitor = Monitor::new();
+    fn monitoring() -> AudioBus {
+        let monitor = AudioBus::new();
         monitor.set_monitoring(true);
         monitor
     }
@@ -1289,7 +1344,7 @@ mod tests {
         // Recording with passthrough off is the useful combination on speakers.
         // The samples must be kept and not played, so nothing goes into the
         // live queue to be heard a moment later or left there to go stale.
-        let monitor = Monitor::new();
+        let monitor = AudioBus::new();
         for _ in 0..PREFILL * 2 {
             monitor.push_live(0.9);
         }
@@ -1300,32 +1355,29 @@ mod tests {
 
     #[test]
     fn the_tape_keeps_what_the_monitor_is_not_playing() {
-        let sinks = Sinks {
-            monitor: Arc::new(Monitor::new()),
-            tape: Arc::new(Tape::new()),
-        };
+        let bus = AudioBus::new();
 
         // Disarmed, the tape ignores everything: an open microphone must not
         // quietly fill a buffer nobody is going to read.
-        sinks.push(0.5);
+        bus.record(0.5);
         let mut out = Vec::new();
-        sinks.tape.collect(&mut out);
+        bus.tape.collect(&mut out);
         assert!(out.is_empty());
 
-        sinks.tape.arm();
+        bus.tape.arm();
         for n in 0..1000 {
-            sinks.push(n as f32);
+            bus.record(n as f32);
         }
 
-        sinks.tape.collect(&mut out);
+        bus.tape.collect(&mut out);
         assert_eq!(out.len(), 1000);
         assert_eq!(out[0], 0.0);
         assert_eq!(out[999], 999.0);
-        assert!(!sinks.tape.dropped.load(Ordering::Relaxed));
+        assert!(!bus.tape.dropped.load(Ordering::Relaxed));
 
         // Collecting is draining: the next sweep only sees what arrived since.
         out.clear();
-        sinks.tape.collect(&mut out);
+        bus.tape.collect(&mut out);
         assert!(out.is_empty());
     }
 
@@ -1363,12 +1415,12 @@ mod tests {
 
     #[test]
     fn a_take_plays_back_at_the_rate_the_synth_drains_it() {
-        let monitor = Arc::new(Monitor::new());
-        let take = Arc::new(VoiceTake::new(
+        let monitor = Arc::new(AudioBus::new());
+        let take = Arc::new(AudioTake::new(
             (0..5000).map(|n| n as f32).collect(),
             48_000,
         ));
-        let mut playback = VoicePlayback::new(Arc::clone(&monitor), take);
+        let mut playback = TakePlayback::new(Arc::clone(&monitor), take);
 
         // Paused, nothing is queued and nothing is heard.
         playback.update(false);
@@ -1391,12 +1443,12 @@ mod tests {
 
     #[test]
     fn pausing_a_take_gives_back_what_was_queued_but_never_heard() {
-        let monitor = Arc::new(Monitor::new());
-        let take = Arc::new(VoiceTake::new(
+        let monitor = Arc::new(AudioBus::new());
+        let take = Arc::new(AudioTake::new(
             (0..5000).map(|n| n as f32).collect(),
             48_000,
         ));
-        let mut playback = VoicePlayback::new(Arc::clone(&monitor), take);
+        let mut playback = TakePlayback::new(Arc::clone(&monitor), take);
 
         playback.update(true);
         for _ in 0..100 {
@@ -1418,9 +1470,9 @@ mod tests {
 
     #[test]
     fn a_take_ends_rather_than_looping_or_repeating_its_tail() {
-        let monitor = Arc::new(Monitor::new());
-        let take = Arc::new(VoiceTake::new(vec![0.5; PREFILL + 10], 48_000));
-        let mut playback = VoicePlayback::new(Arc::clone(&monitor), take);
+        let monitor = Arc::new(AudioBus::new());
+        let take = Arc::new(AudioTake::new(vec![0.5; PREFILL + 10], 48_000));
+        let mut playback = TakePlayback::new(Arc::clone(&monitor), take);
 
         playback.update(true);
         for _ in 0..PREFILL + 10 {
@@ -1434,10 +1486,10 @@ mod tests {
 
     #[test]
     fn dropping_a_preview_does_not_leave_a_voice_queued() {
-        let monitor = Arc::new(Monitor::new());
-        let take = Arc::new(VoiceTake::new(vec![0.5; 5000], 48_000));
+        let monitor = Arc::new(AudioBus::new());
+        let take = Arc::new(AudioTake::new(vec![0.5; 5000], 48_000));
 
-        let mut playback = VoicePlayback::new(Arc::clone(&monitor), take);
+        let mut playback = TakePlayback::new(Arc::clone(&monitor), take);
         playback.update(true);
         assert!(monitor.preview.ring.len() > 0);
 
@@ -1449,16 +1501,16 @@ mod tests {
 
     #[test]
     fn a_take_finds_its_loudest_moment() {
-        assert_eq!(VoiceTake::new(vec![0.1, -0.8, 0.3], 48_000).peak(), 0.8);
+        assert_eq!(AudioTake::new(vec![0.1, -0.8, 0.3], 48_000).peak(), 0.8);
         // Silence has to read as exactly zero: it is what tells a player their
         // microphone was open and heard nothing at all.
-        assert_eq!(VoiceTake::new(vec![0.0; 100], 48_000).peak(), 0.0);
-        assert_eq!(VoiceTake::new(Vec::new(), 48_000).peak(), 0.0);
+        assert_eq!(AudioTake::new(vec![0.0; 100], 48_000).peak(), 0.0);
+        assert_eq!(AudioTake::new(Vec::new(), 48_000).peak(), 0.0);
     }
 
     #[test]
     fn a_take_writes_a_wav_a_player_will_open() {
-        let take = VoiceTake::new(vec![0.0, 1.0, -1.0, 0.5], 44_100);
+        let take = AudioTake::new(vec![0.0, 1.0, -1.0, 0.5], 44_100);
         let wav = take.wav_bytes();
 
         assert_eq!(&wav[0..4], b"RIFF");
@@ -1489,7 +1541,7 @@ mod tests {
     fn a_sample_past_full_scale_clips_rather_than_wrapping() {
         // The limiter should mean this never happens. If it does, the sound to
         // make is a loud one, not the crack of a waveform folding over.
-        let wav = VoiceTake::new(vec![2.0, -2.0], 48_000).wav_bytes();
+        let wav = AudioTake::new(vec![2.0, -2.0], 48_000).wav_bytes();
         let samples: Vec<i16> = wav[44..]
             .chunks_exact(2)
             .map(|pair| i16::from_le_bytes(pair.try_into().unwrap()))
@@ -1498,45 +1550,37 @@ mod tests {
     }
 
     #[test]
-    fn a_voice_survives_the_whole_trip_from_microphone_to_speaker() {
+    fn a_performance_survives_the_whole_trip_from_synth_to_take_and_back() {
         // Every stage the real thing goes through, in order, with only the
-        // device and the frame timer left out: capture pushes into the sinks,
-        // the frame loop sweeps the tape into a take, the take is played back
-        // through the monitor, and the synth reads it out again.
+        // devices and the frame timer left out: the synth hands its finished
+        // mix to the bus, the frame loop sweeps the tape into a take, the take
+        // is played back through the same bus, and the synth reads it out
+        // again.
         //
         // Each stage is covered on its own above. This is here because the
         // failure worth catching is a join between two of them rather than
         // anything inside one, and a join is exactly what per-stage tests miss.
-        let sinks = Sinks {
-            monitor: Arc::new(Monitor::new()),
-            tape: Arc::new(Tape::new()),
-        };
+        let bus = Arc::new(AudioBus::new());
+        bus.tape.arm();
 
-        // Recording with monitoring off, which is the combination the freeplay
-        // screen uses: nothing is being heard live, and it must still be kept.
-        sinks.tape.arm();
+        let played: Vec<f32> = (0..4000).map(|n| ((n as f32) / 50.0).sin() * 0.4).collect();
 
-        let sung: Vec<f32> = (0..4000).map(|n| ((n as f32) / 50.0).sin() * 0.4).collect();
-
-        // Captured in callback-sized bursts and swept up between them, the way
+        // Written in callback-sized bursts and swept up between them, the way
         // the frame loop actually meets the audio thread.
         let mut collected = Vec::new();
-        for burst in sung.chunks(128) {
+        for burst in played.chunks(128) {
             for &sample in burst {
-                sinks.push(sample);
+                bus.record(sample);
             }
-            sinks.tape.collect(&mut collected);
+            bus.tape.collect(&mut collected);
         }
-        sinks.tape.disarm();
-        sinks.tape.collect(&mut collected);
+        bus.tape.disarm();
+        bus.tape.collect(&mut collected);
 
-        assert_eq!(collected, sung, "the take is not what was sung");
+        assert_eq!(collected, played, "the take is not what was played");
 
-        // Stopping the take closes the microphone; the preview then plays back
-        // through the same monitor the passthrough would have used.
-        let take = Arc::new(VoiceTake::new(collected, 48_000));
-        let monitor = Arc::clone(&sinks.monitor);
-        let mut playback = VoicePlayback::new(Arc::clone(&monitor), Arc::clone(&take));
+        let take = Arc::new(AudioTake::new(collected, 48_000));
+        let mut playback = TakePlayback::new(Arc::clone(&bus), Arc::clone(&take));
 
         let mut heard = Vec::new();
         playback.update(true);
@@ -1544,18 +1588,18 @@ mod tests {
         // run on past the end of the take so the tail is covered too.
         for _ in 0..40 {
             for _ in 0..128 {
-                heard.push(monitor.next());
+                heard.push(bus.next());
             }
             playback.update(true);
         }
 
         assert_eq!(
-            heard[..sung.len()],
-            sung[..],
-            "what came out of the synth is not what went into the microphone"
+            heard[..played.len()],
+            played[..],
+            "what came back out of the synth is not what went into the take"
         );
         assert!(
-            heard[sung.len()..].iter().all(|sample| *sample == 0.0),
+            heard[played.len()..].iter().all(|sample| *sample == 0.0),
             "the take carried on making noise after it ended"
         );
     }

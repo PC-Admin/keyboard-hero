@@ -72,7 +72,7 @@ impl Context {
         // the queue before anything connects an output.
         let mic_passthrough = MicPassthrough::default();
         let mut output_manager = OutputManager::default();
-        output_manager.set_microphone(mic_passthrough.monitor());
+        output_manager.set_audio_bus(mic_passthrough.bus());
 
         Self {
             window,
