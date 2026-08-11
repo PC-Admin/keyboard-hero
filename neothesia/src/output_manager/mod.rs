@@ -90,11 +90,12 @@ pub struct OutputManager {
     synth_backend: Option<SynthBackend>,
     midi_backend: Option<MidiBackend>,
 
-    /// Where the synth picks up the microphone, when one is being passed
-    /// through. Handed over once at startup and kept, so every synth connection
-    /// made afterwards — a new soundfont, a switch of output and back — gets it
+    /// The synth's two-way connection to the microphone: where it picks up
+    /// singing to add, and where it hands its finished mix back to be recorded.
+    /// Handed over once at startup and kept, so every synth connection made
+    /// afterwards — a new soundfont, a switch of output and back — gets it
     /// without the callers of [`OutputManager::connect`] knowing it exists.
-    microphone: Option<std::sync::Arc<crate::microphone::Monitor>>,
+    bus: Option<std::sync::Arc<crate::microphone::AudioBus>>,
 
     output_connection: (OutputDescriptor, OutputConnection),
 }
@@ -128,15 +129,16 @@ impl OutputManager {
             #[cfg(feature = "synth")]
             synth_backend,
             midi_backend,
-            microphone: None,
+            bus: None,
 
             output_connection: (OutputDescriptor::DummyOutput, OutputConnection::DummyOutput),
         }
     }
 
-    /// Tell the synth where to find the microphone. Called once, at startup.
-    pub fn set_microphone(&mut self, monitor: std::sync::Arc<crate::microphone::Monitor>) {
-        self.microphone = Some(monitor);
+    /// Tell the synth where to find the microphone, and where to hand its mix
+    /// back. Called once, at startup.
+    pub fn set_audio_bus(&mut self, bus: std::sync::Arc<crate::microphone::AudioBus>) {
+        self.bus = Some(bus);
     }
 
     pub fn outputs(&self) -> Vec<OutputDescriptor> {
@@ -161,18 +163,18 @@ impl OutputManager {
                 #[cfg(feature = "synth")]
                 OutputDescriptor::Synth(ref font) => {
                     if let Some(ref mut synth) = self.synth_backend {
-                        let mic = self.microphone.clone();
+                        let bus = self.bus.clone();
                         if let Some(font) = font.clone() {
                             self.output_connection = (
                                 desc,
-                                OutputConnection::Synth(synth.new_output_connection(&font, mic)),
+                                OutputConnection::Synth(synth.new_output_connection(&font, bus)),
                             );
                         } else if let Some(path) = crate::utils::resources::default_sf2()
                             && path.exists()
                         {
                             self.output_connection = (
                                 desc,
-                                OutputConnection::Synth(synth.new_output_connection(&path, mic)),
+                                OutputConnection::Synth(synth.new_output_connection(&path, bus)),
                             );
                         }
                     }

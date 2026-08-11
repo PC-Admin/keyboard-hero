@@ -87,6 +87,20 @@ pub trait Scene {
     fn midi_event(&mut self, _ctx: &mut Context, _channel: u8, _message: &MidiMessage) {}
 }
 
+/// The one key that switches the microphone, wherever you are.
+///
+/// Shared rather than written out per scene so it cannot end up meaning
+/// different things in different rooms — the menu is where you set it up before
+/// a song, freeplay is where you notice mid-take that you wanted it on.
+///
+/// `m` is not one of the letters `handle_pc_keyboard_to_midi_event` maps to a
+/// note, so this can sit alongside it without stealing a key from the keyboard.
+pub fn handle_mic_toggle_event(ctx: &mut Context, event: &WindowEvent) {
+    if event.key_pressed(Key::Character("m")) {
+        ctx.mic_passthrough.toggle();
+    }
+}
+
 pub fn handle_pc_keyboard_to_midi_event(ctx: &mut Context, event: &WindowEvent) {
     let WindowEvent::KeyboardInput {
         event:

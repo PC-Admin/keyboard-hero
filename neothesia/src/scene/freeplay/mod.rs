@@ -159,6 +159,22 @@ impl FreeplayScene {
         }
     }
 
+    /// Back to the menu, by whichever of the several ways out was taken.
+    ///
+    /// All of them come through here so none of them can walk off leaving the
+    /// microphone held open: a take abandoned mid-recording still has to
+    /// release the device, or the mic stays live for the rest of the session
+    /// with nothing on screen saying so.
+    pub(super) fn leave(&mut self, ctx: &mut Context) {
+        if self.recorder.is_recording() {
+            self.recorder.abandon(&mut ctx.mic_passthrough);
+        }
+
+        ctx.proxy
+            .send_event(NeothesiaEvent::MainMenu(self.song.clone()))
+            .ok();
+    }
+
     fn dispatch_futures(&mut self, ctx: &mut Context) {
         let mut cbs = Vec::new();
         self.futures
@@ -182,6 +198,11 @@ impl Scene for FreeplayScene {
         self.quad_renderer_fg.clear();
 
         self.dispatch_futures(ctx);
+
+        // Before anything that might take a while. The synth's buffer is the
+        // only place recorded samples live until this runs, so the longer a
+        // frame leaves it the closer the take comes to losing some.
+        self.recorder.collect_audio(&ctx.mic_passthrough);
 
         if let Some(preview) = self.preview.as_mut() {
             preview.update(&mut self.keyboard, ctx, delta);
@@ -237,9 +258,7 @@ impl Scene for FreeplayScene {
         }
 
         if event.back_mouse_pressed() || event.key_released(Key::Named(NamedKey::Escape)) {
-            ctx.proxy
-                .send_event(NeothesiaEvent::MainMenu(self.song.clone()))
-                .ok();
+            self.leave(ctx);
         }
 
         if event.key_released(Key::Named(NamedKey::Space)) && self.preview.is_some() {
@@ -247,6 +266,7 @@ impl Scene for FreeplayScene {
         }
 
         super::handle_nuon_window_event(&mut self.nuon, event, ctx);
+        super::handle_mic_toggle_event(ctx, event);
         super::handle_pc_keyboard_to_midi_event(ctx, event);
         super::handle_mouse_to_midi_event(
             &mut self.keyboard,

@@ -72,7 +72,7 @@ impl SynthBackend {
         &self,
         rx: Receiver<SynthEvent>,
         path: &Path,
-        microphone: Option<Arc<crate::microphone::Monitor>>,
+        bus: Option<Arc<crate::microphone::AudioBus>>,
     ) -> cpal::Stream {
         #[cfg(all(feature = "fluid-synth", not(feature = "oxi-synth")))]
         let mut next_value = fluidsynth_adapter(self, rx, path);
@@ -96,10 +96,26 @@ impl SynthBackend {
                         // rather than one of its own — see `crate::microphone`
                         // for why. Zero whenever passthrough is off, so this
                         // costs a load and an add and needs no flag of its own.
-                        let mic = microphone.as_ref().map(|m| m.next()).unwrap_or(0.0);
+                        let mic = bus.as_ref().map(|bus| bus.next()).unwrap_or(0.0);
 
-                        let l = T::from_sample(l + mic);
-                        let r = T::from_sample(r + mic);
+                        let l = l + mic;
+                        let r = r + mic;
+
+                        // And straight back to be recorded, if a take is
+                        // running. Taken from here rather than from the
+                        // microphone because this is the performance — piano
+                        // and singing already summed, exactly as the speakers
+                        // got it. Folded to one channel: the microphone is mono
+                        // and goes to both sides, so the width being given up
+                        // is the piano's alone, and it buys a file half the
+                        // size and a recorder that never has to think about
+                        // channel counts.
+                        if let Some(bus) = bus.as_ref() {
+                            bus.record((l + r) * 0.5);
+                        }
+
+                        let l = T::from_sample(l);
+                        let r = T::from_sample(r);
 
                         let channels = [l, r];
 
@@ -120,23 +136,22 @@ impl SynthBackend {
     pub fn new_output_connection(
         &mut self,
         path: &Path,
-        microphone: Option<Arc<crate::microphone::Monitor>>,
+        bus: Option<Arc<crate::microphone::AudioBus>>,
     ) -> SynthOutputConnection {
         let (tx, rx) = std::sync::mpsc::channel::<SynthEvent>();
-        let mic = microphone;
         let stream = match self.sample_format {
-            cpal::SampleFormat::I8 => self.run::<i8>(rx, path, mic),
-            cpal::SampleFormat::I16 => self.run::<i16>(rx, path, mic),
-            cpal::SampleFormat::I32 => self.run::<i32>(rx, path, mic),
-            cpal::SampleFormat::I64 => self.run::<i64>(rx, path, mic),
+            cpal::SampleFormat::I8 => self.run::<i8>(rx, path, bus.clone()),
+            cpal::SampleFormat::I16 => self.run::<i16>(rx, path, bus.clone()),
+            cpal::SampleFormat::I32 => self.run::<i32>(rx, path, bus.clone()),
+            cpal::SampleFormat::I64 => self.run::<i64>(rx, path, bus.clone()),
 
-            cpal::SampleFormat::U8 => self.run::<u8>(rx, path, mic),
-            cpal::SampleFormat::U16 => self.run::<u16>(rx, path, mic),
-            cpal::SampleFormat::U32 => self.run::<u32>(rx, path, mic),
-            cpal::SampleFormat::U64 => self.run::<u64>(rx, path, mic),
+            cpal::SampleFormat::U8 => self.run::<u8>(rx, path, bus.clone()),
+            cpal::SampleFormat::U16 => self.run::<u16>(rx, path, bus.clone()),
+            cpal::SampleFormat::U32 => self.run::<u32>(rx, path, bus.clone()),
+            cpal::SampleFormat::U64 => self.run::<u64>(rx, path, bus.clone()),
 
-            cpal::SampleFormat::F32 => self.run::<f32>(rx, path, mic),
-            cpal::SampleFormat::F64 => self.run::<f64>(rx, path, mic),
+            cpal::SampleFormat::F32 => self.run::<f32>(rx, path, bus.clone()),
+            cpal::SampleFormat::F64 => self.run::<f64>(rx, path, bus.clone()),
             sample_format => unimplemented!("Unsupported sample format '{sample_format}'"),
         };
 
