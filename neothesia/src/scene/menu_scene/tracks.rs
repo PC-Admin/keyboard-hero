@@ -245,6 +245,24 @@ enum RowEvent {
     ToggleMute,
 }
 
+/// "L" or "R", or nothing for a track with no hand to speak of (percussion).
+/// Middle C is the same split point `engrave::engrave` uses to send notes to
+/// the treble or bass staff, so a track's letter here agrees with where its
+/// notes would land on the grand staff: mostly at or above it reads as the
+/// right hand, mostly below as the left.
+fn hand_label(track: &MidiTrack) -> Option<&'static str> {
+    if track.has_drums && !track.has_other_than_drums {
+        return None;
+    }
+
+    let below = track.notes.iter().filter(|n| n.note < 60).count();
+    if below * 2 > track.notes.len() {
+        Some("L")
+    } else {
+        Some("R")
+    }
+}
+
 /// Microphone passthrough as one wide toggle, shaped like a track row so the
 /// two read as one panel: an indicator where a track keeps its colour, the name
 /// where a track keeps its instrument, and the state where a track keeps its
@@ -426,6 +444,18 @@ fn track_row(
     let mut res = None;
     let pad = 10.0;
 
+    // Colour alone doesn't say which hand a part is — a blue dot and a pink
+    // dot look equally arbitrary until you've memorised this song. Letter it
+    // with the same split the sheet view uses for treble vs bass, so BLUE and
+    // PINK always resolve to a hand.
+    let hand = hand_label(track);
+    let luminance = 0.299 * track_color.r + 0.587 * track_color.g + 0.114 * track_color.b;
+    let dot_font_color = if luminance > 0.5 {
+        nuon::Color::new_u8(20, 20, 20, 1.0)
+    } else {
+        nuon::Color::WHITE
+    };
+
     if nuon::button()
         .id(nuon::Id::hash_with(|h| {
             "track_visible".hash(h);
@@ -442,6 +472,8 @@ fn track_row(
         ))
         .preseed_color(track_color)
         .border_radius([255.0; 4])
+        .label(hand.unwrap_or(""))
+        .font_color(dot_font_color)
         .build(ui)
     {
         res = Some(RowEvent::ToggleVisible);
@@ -524,6 +556,50 @@ fn track_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    fn note(midi: u8) -> midi_file::MidiNote {
+        midi_file::MidiNote {
+            start: std::time::Duration::ZERO,
+            end: std::time::Duration::from_secs(1),
+            duration: std::time::Duration::from_secs(1),
+            note: midi,
+            velocity: 100,
+            channel: 0,
+            track_id: 0,
+            track_color_id: 0,
+        }
+    }
+
+    fn track(notes: Vec<u8>, drums: bool) -> MidiTrack {
+        MidiTrack {
+            notes: Arc::from(notes.into_iter().map(note).collect::<Vec<_>>()),
+            events: Arc::from(vec![]),
+            track_id: 0,
+            track_color_id: 0,
+            programs: Arc::from(vec![]),
+            has_drums: drums,
+            has_other_than_drums: !drums,
+        }
+    }
+
+    /// A melody sitting above middle C reads as the right hand's part.
+    #[test]
+    fn notes_above_middle_c_are_the_right_hand() {
+        assert_eq!(hand_label(&track(vec![64, 67, 72], false)), Some("R"));
+    }
+
+    /// An accompaniment sitting below middle C reads as the left hand's.
+    #[test]
+    fn notes_below_middle_c_are_the_left_hand() {
+        assert_eq!(hand_label(&track(vec![36, 40, 43], false)), Some("L"));
+    }
+
+    /// A percussion-only track has no hand to letter.
+    #[test]
+    fn percussion_has_no_hand() {
+        assert_eq!(hand_label(&track(vec![38, 42], true)), None);
+    }
 
     #[test]
     fn the_meter_reads_in_decibels() {
