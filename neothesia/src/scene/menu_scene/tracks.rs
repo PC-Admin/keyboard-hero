@@ -21,6 +21,7 @@
 
 use midi_file::MidiTrack;
 use nuon::TextJustify;
+use std::collections::HashMap;
 use std::hash::Hash;
 
 use crate::{
@@ -174,6 +175,8 @@ impl super::MenuScene {
         let mut event = None;
 
         if let Some(song) = self.state.song.as_ref() {
+            let hands = hand_labels(&song.file.tracks);
+
             for (row, track) in song
                 .file
                 .tracks
@@ -183,11 +186,12 @@ impl super::MenuScene {
                 .enumerate()
             {
                 let config = &song.config.tracks[track.track_id];
+                let hand = hands.get(&track.track_id).copied();
 
                 nuon::translate()
                     .y(row as f32 * (ROW_H + ROW_GAP))
                     .build(ui, |ui| {
-                        if let Some(ev) = track_row(ctx, ui, w, row, track, config) {
+                        if let Some(ev) = track_row(ctx, ui, w, row, track, config, hand) {
                             event = Some((track.track_id, ev));
                         }
                     });
@@ -243,6 +247,38 @@ enum RowEvent {
     ToggleVisible,
     ToggleAuto,
     ToggleMute,
+}
+
+/// "L" or "R" for every melodic track in the song, keyed by `track_id`.
+/// Percussion gets no letter (no hand to speak of), and neither does a song
+/// with only one melodic track — there is no other hand for it to be
+/// distinguished from.
+///
+/// The split is against the *other* melodic tracks' average pitch, not a
+/// fixed middle-C line: a beginner arrangement can easily keep both hands
+/// above (or below) middle C, and an absolute threshold reads both tracks as
+/// the same hand when that happens. Whichever track sits higher, on average,
+/// than its siblings is "R"; the rest are "L".
+fn hand_labels(tracks: &[MidiTrack]) -> HashMap<usize, &'static str> {
+    let melodic: Vec<(usize, f64)> = tracks
+        .iter()
+        .filter(|t| !t.notes.is_empty() && !(t.has_drums && !t.has_other_than_drums))
+        .map(|t| {
+            let sum: u64 = t.notes.iter().map(|n| n.note as u64).sum();
+            (t.track_id, sum as f64 / t.notes.len() as f64)
+        })
+        .collect();
+
+    if melodic.len() < 2 {
+        return HashMap::new();
+    }
+
+    let mean = melodic.iter().map(|(_, avg)| avg).sum::<f64>() / melodic.len() as f64;
+
+    melodic
+        .into_iter()
+        .map(|(id, avg)| (id, if avg >= mean { "R" } else { "L" }))
+        .collect()
 }
 
 /// Microphone passthrough as one wide toggle, shaped like a track row so the
@@ -394,6 +430,7 @@ fn track_row(
     row: usize,
     track: &MidiTrack,
     config: &TrackConfig,
+    hand: Option<&'static str>,
 ) -> Option<RowEvent> {
     let muted = config.player == PlayerConfig::Mute;
     let auto = config.player == PlayerConfig::Auto;
@@ -425,13 +462,14 @@ fn track_row(
 
     let mut res = None;
     let pad = 10.0;
+    let dot_pos = (pad, (ROW_H - DOT) / 2.0);
 
     if nuon::button()
         .id(nuon::Id::hash_with(|h| {
             "track_visible".hash(h);
             row.hash(h);
         }))
-        .pos(pad, (ROW_H - DOT) / 2.0)
+        .pos(dot_pos.0, dot_pos.1)
         .size(DOT, DOT)
         .color(track_color)
         .hover_color(nuon::Color::new(
@@ -445,6 +483,21 @@ fn track_row(
         .build(ui)
     {
         res = Some(RowEvent::ToggleVisible);
+    }
+
+    // Colour alone doesn't say which hand a part is — a blue dot and a pink
+    // dot look equally arbitrary until you've memorised this song. Letter it,
+    // white and bold so it reads on any dot colour.
+    if let Some(hand) = hand {
+        nuon::label()
+            .pos(dot_pos.0, dot_pos.1)
+            .size(DOT, DOT)
+            .text(hand)
+            .text_justify(TextJustify::Center)
+            .font_size(13.0)
+            .bold(true)
+            .color(nuon::Color::WHITE)
+            .build(ui);
     }
 
     let buttons_w = BTN_W * 2.0 + BTN_GAP;
@@ -524,6 +577,80 @@ fn track_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    fn note(midi: u8, track_id: usize) -> midi_file::MidiNote {
+        midi_file::MidiNote {
+            start: std::time::Duration::ZERO,
+            end: std::time::Duration::from_secs(1),
+            duration: std::time::Duration::from_secs(1),
+            note: midi,
+            velocity: 100,
+            channel: 0,
+            track_id,
+            track_color_id: track_id,
+        }
+    }
+
+    fn track(id: usize, notes: Vec<u8>, drums: bool) -> MidiTrack {
+        MidiTrack {
+            notes: Arc::from(notes.into_iter().map(|n| note(n, id)).collect::<Vec<_>>()),
+            events: Arc::from(vec![]),
+            track_id: id,
+            track_color_id: id,
+            programs: Arc::from(vec![]),
+            has_drums: drums,
+            has_other_than_drums: !drums,
+        }
+    }
+
+    /// Two hands that both sit above middle C — a beginner arrangement can do
+    /// this — still split correctly: whichever is higher reads "R".
+    #[test]
+    fn hands_split_by_comparison_even_when_both_are_above_middle_c() {
+        let tracks = [
+            track(0, vec![62, 64, 65], false), // avg 63.7, but the lower of the two
+            track(1, vec![72, 74, 76], false), // avg 74, clearly the higher
+        ];
+
+        let hands = hand_labels(&tracks);
+        assert_eq!(hands.get(&0), Some(&"L"));
+        assert_eq!(hands.get(&1), Some(&"R"));
+    }
+
+    /// The ordinary case still works: melody above middle C, accompaniment
+    /// below it.
+    #[test]
+    fn hands_split_across_middle_c_the_ordinary_way() {
+        let tracks = [
+            track(0, vec![64, 67, 72], false),
+            track(1, vec![36, 40, 43], false),
+        ];
+
+        let hands = hand_labels(&tracks);
+        assert_eq!(hands.get(&0), Some(&"R"));
+        assert_eq!(hands.get(&1), Some(&"L"));
+    }
+
+    /// A percussion-only track has no hand to letter.
+    #[test]
+    fn percussion_has_no_hand() {
+        let tracks = [
+            track(0, vec![64, 67, 72], false),
+            track(1, vec![38, 42], true),
+        ];
+
+        let hands = hand_labels(&tracks);
+        assert_eq!(hands.get(&1), None);
+    }
+
+    /// A lone melodic track has no sibling to compare against, so it gets no
+    /// letter — there's no "other hand" for it to be distinguished from.
+    #[test]
+    fn a_solo_track_gets_no_hand() {
+        let tracks = [track(0, vec![64, 67, 72], false)];
+        assert!(hand_labels(&tracks).is_empty());
+    }
 
     #[test]
     fn the_meter_reads_in_decibels() {
