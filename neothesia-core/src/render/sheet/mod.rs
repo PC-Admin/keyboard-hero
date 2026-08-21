@@ -22,6 +22,13 @@
 //! approximations, and the geometry below can lean on SMuFL's two guarantees:
 //! one em is four staff spaces, and a glyph's origin sits on its staff
 //! position. Staff lines, stems, ledger lines and bar lines are plain quads.
+//!
+//! This module only draws the strip at whatever `y_offset` it's told each
+//! frame and reports its own bounding box via [`SheetMusic::rect`]; deciding
+//! *where* that offset puts it — hugging the top bar, or dropped down over
+//! the keyboard for a player who reads ahead better close to their hands —
+//! is the playing scene's call, along with the hover arrow that offers the
+//! move.
 
 mod engrave;
 
@@ -183,6 +190,14 @@ pub struct SheetMusic {
     /// How far the whole strip is pushed down this frame, so the expanding
     /// top bar slides it out of the way instead of covering it.
     y_offset: f32,
+    /// The strip's horizontal extent as of the last `update`, kept around so
+    /// [`Self::rect`] can hand the caller a hit-box without recomputing it.
+    last_band: Band,
+    /// How much bigger than normal the strip is drawn this frame, growing
+    /// out from its own bottom-centre — the edge nearest the keyboard stays
+    /// put, so this only ever reads as "the same strip, but roomier",
+    /// never as it sliding out of place.
+    zoom: f32,
 }
 
 impl SheetMusic {
@@ -221,12 +236,36 @@ impl SheetMusic {
             middle_c_y,
             height,
             y_offset: 0.0,
+            last_band: Band::new(0.0),
+            zoom: 1.0,
         }
     }
 
-    /// Height of the strip in logical pixels.
+    /// Height of the strip in logical pixels, unzoomed — this is what a
+    /// caller positions the strip's *bottom* against, since zooming grows it
+    /// upward from there rather than changing where that edge sits.
     pub fn height(&self) -> f32 {
         self.height
+    }
+
+    /// Where this frame's zoom grows the strip out from: its own
+    /// bottom-centre, so the edge nearest the keyboard never moves.
+    fn anchor(&self) -> (f32, f32) {
+        (self.last_band.centre, self.y_offset + self.height)
+    }
+
+    fn zoom_xy(&self, x: f32, y: f32) -> (f32, f32) {
+        let (ax, ay) = self.anchor();
+        (ax + (x - ax) * self.zoom, ay + (y - ay) * self.zoom)
+    }
+
+    /// The strip's bounding box as of the last `update`, in logical pixels —
+    /// where a caller would put a hover/click target over it. Reflects
+    /// whatever zoom that `update` was drawn at.
+    pub fn rect(&self) -> Rect {
+        let (x0, y0) = self.zoom_xy(self.last_band.left, self.y_offset);
+        let (x1, y1) = self.zoom_xy(self.last_band.right, self.y_offset + self.height);
+        Rect::new((x0, y0).into(), (x1 - x0, y1 - y0).into())
     }
 
     pub fn is_empty(&self) -> bool {
@@ -245,12 +284,19 @@ impl SheetMusic {
         }
     }
 
+    /// `left`/`step` are this glyph's *unzoomed* position on the strip;
+    /// zoom is folded in here rather than at each call site. Glyphon scales
+    /// a placed glyph's own internal offsets by `TextArea::scale` but
+    /// leaves `top`/`left` themselves alone, so the baseline offset — which
+    /// is one of those internal offsets in spirit, just precomputed outside
+    /// glyphon — has to be pre-scaled too, or a zoomed glyph would sit low.
     fn push_glyph(&mut self, id: usize, left: f32, step: f32, color: [f32; 4]) {
         if color[3] <= 0.01 {
             return;
         }
         let baseline = self.glyphs[id].baseline;
-        let top = self.y_of(step) - baseline;
+        let (left, y) = self.zoom_xy(left, self.y_of(step));
+        let top = y - baseline * self.zoom;
         self.placed.push(Placed {
             id,
             left,
@@ -267,11 +313,14 @@ impl SheetMusic {
         time: f32,
         size: dpi::LogicalSize<f32>,
         y_offset: f32,
+        zoom: f32,
     ) {
         self.placed.clear();
         self.y_offset = y_offset;
 
         let band = Band::new(size.width);
+        self.last_band = band;
+        self.zoom = zoom;
         let mut quads: Vec<QuadInstance> = Vec::new();
 
         self.draw_backdrop(&mut quads, band);
@@ -281,16 +330,30 @@ impl SheetMusic {
         self.draw_gutter(&mut quads, band);
         self.draw_playhead(&mut quads, band);
 
-        // Clip to the strip so nothing reaches the HUD to either side or the
-        // waterfall below. Oversized scissor rects are a wgpu validation
-        // error, so clamp to the surface.
-        let x = ((band.left * scale) as u32).min(physical_size.width);
-        let y = ((self.y_offset.max(0.0) * scale) as u32).min(physical_size.height);
-        let w = ((band.right - band.left) * scale) as u32;
-        let h = ((self.height * scale) as u32).min(physical_size.height - y);
+        // Every quad above was placed as if zoom were 1.0; grow them all out
+        // from the strip's bottom-centre now, in one pass, rather than
+        // threading zoom through each `draw_*` call. Glyphs already carry
+        // their own zoom from `push_glyph`.
+        if self.zoom != 1.0 {
+            for q in &mut quads {
+                let (x, y) = self.zoom_xy(q.position[0], q.position[1]);
+                q.position = [x, y];
+                q.size = [q.size[0] * self.zoom, q.size[1] * self.zoom];
+            }
+        }
+
+        // Clip to the strip's zoomed bounds so nothing reaches the HUD to
+        // either side or the waterfall below. Oversized scissor rects are a
+        // wgpu validation error, so clamp to the surface.
+        let strip_rect = self.rect();
+        let x = ((strip_rect.origin.x * scale) as u32).min(physical_size.width);
+        let y = ((strip_rect.origin.y.max(0.0) * scale) as u32).min(physical_size.height);
+        let w = (strip_rect.size.width * scale) as u32;
+        let h = (strip_rect.size.height * scale) as u32;
+        let h = h.min(physical_size.height.saturating_sub(y));
         let clip = Rect::new(
             (x, y).into(),
-            (w.min(physical_size.width - x), h).into(),
+            (w.min(physical_size.width.saturating_sub(x)), h).into(),
         );
 
         self.quad_renderer.clear();
@@ -300,20 +363,21 @@ impl SheetMusic {
 
         self.text_renderer.set_scissor_rect(clip);
 
-        let bounds = glyphon::TextBounds {
-            left: band.left as i32,
-            top: self.y_offset as i32,
-            right: band.right.ceil() as i32,
-            bottom: (self.y_offset + self.height).ceil() as i32,
+        let text_bounds = glyphon::TextBounds {
+            left: strip_rect.origin.x as i32,
+            top: strip_rect.origin.y as i32,
+            right: strip_rect.max_x().ceil() as i32,
+            bottom: strip_rect.max_y().ceil() as i32,
         };
 
+        let zoom = self.zoom;
         let glyphs = &self.glyphs;
         let areas = self.placed.iter().map(|p| glyphon::TextArea {
             buffer: &glyphs[p.id].buffer,
             left: p.left,
             top: p.top,
-            scale: 1.0,
-            bounds,
+            scale: zoom,
+            bounds: text_bounds,
             default_color: p.color,
             custom_glyphs: &[],
         });

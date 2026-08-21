@@ -48,6 +48,10 @@ pub fn caret_down() -> &'static str {
     "\u{f229}"
 }
 
+pub fn caret_up() -> &'static str {
+    "\u{f235}"
+}
+
 pub fn record_icon() -> &'static str {
     "\u{f519}"
 }

@@ -34,6 +34,9 @@ pub struct WaterfallConfigV1 {
 
     #[serde(default = "default_sheet_music")]
     pub sheet_music: bool,
+
+    #[serde(default = "default_sheet_music_bottom")]
+    pub sheet_music_bottom: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -48,6 +51,7 @@ impl Default for WaterfallConfig {
             animation_offset: default_animation_offset(),
             note_labels: default_note_labels(),
             sheet_music: default_sheet_music(),
+            sheet_music_bottom: default_sheet_music_bottom(),
         })
     }
 }
@@ -217,6 +221,12 @@ fn default_animation_offset() -> f32 {
 
 fn default_sheet_music() -> bool {
     true
+}
+
+/// New installs, and everyone who already has the strip on, keep it at the
+/// top — this is an opt-in reposition, not a new default.
+fn default_sheet_music_bottom() -> bool {
+    false
 }
 
 fn default_note_labels() -> bool {

@@ -12,8 +12,8 @@ use self::top_bar::TopBar;
 
 use super::{NuonRenderer, Scene};
 use crate::{
-    NeothesiaEvent, context::Context, render::WaterfallRenderer, scene::MouseToMidiEventState,
-    song::Song, utils::window::WinitEvent,
+    NeothesiaEvent, context::Context, icons, render::WaterfallRenderer,
+    scene::MouseToMidiEventState, song::Song, utils::window::WinitEvent,
 };
 
 mod keyboard;
@@ -42,6 +42,21 @@ const TITLE_FONT_SIZE: f32 = 14.0;
 /// Logical pixels per second the title crawls leftwards.
 const TITLE_SCROLL_SPEED: f32 = 45.0;
 
+/// Gap kept between the sheet-music strip and the keyboard when the strip is
+/// dropped down, so its own fade-out never touches the keys.
+const SHEET_REPOSITION_GAP: f32 = 10.0;
+/// How much bigger the strip reads once it's dropped down over the keyboard,
+/// where there's both the room and the reason (it's close enough to the
+/// hands now to be worth reading in detail) for the extra size.
+const SHEET_REPOSITION_BOTTOM_ZOOM: f32 = 1.35;
+/// Footprint of the hover-revealed down-arrow that moves the sheet strip.
+const SHEET_REPOSITION_ARROW_SIZE: f32 = 18.0;
+/// Inset of the arrow from the strip's own top-right corner.
+const SHEET_REPOSITION_ARROW_PAD: f32 = 6.0;
+/// Matches `neothesia_core::render::sheet`'s brighter neon tone, so the arrow
+/// reads as part of the same glow rather than a foreign UI colour.
+const SHEET_REPOSITION_ARROW_COLOR: [f32; 3] = [0.72, 1.0, 0.85];
+
 pub struct PlayingScene {
     keyboard: Keyboard,
     waterfall: WaterfallRenderer,
@@ -55,6 +70,11 @@ pub struct PlayingScene {
     /// nothing to engrave (a drum-only file, say).
     sheet: Option<SheetMusic>,
     show_sheet: bool,
+    /// Dropped down over the keyboard instead of hugging the top bar — for a
+    /// player who reads notation well enough to want it close to their
+    /// hands, not skimmed at the top of the screen. Toggled by hovering the
+    /// strip (which surfaces a down-arrow) and clicking it.
+    sheet_at_bottom: bool,
 
     player: MidiPlayer,
     rewind_controller: RewindController,
@@ -168,6 +188,7 @@ impl PlayingScene {
             (!sheet.is_empty()).then_some(sheet)
         };
         let show_sheet = ctx.config.sheet_music();
+        let sheet_at_bottom = ctx.config.sheet_music_bottom();
 
         // Measured with the same font the label will draw with, so the
         // marquee knows exactly when the title has cleared the left edge.
@@ -199,6 +220,7 @@ impl PlayingScene {
             note_labels,
             sheet,
             show_sheet,
+            sheet_at_bottom,
             text_renderer,
             nuon_renderer: NuonRenderer::new(ctx),
 
@@ -886,19 +908,81 @@ impl Scene for PlayingScene {
         if self.show_sheet
             && let Some(sheet) = self.sheet.as_mut()
         {
-            // Ride down with the expanding top bar, as the HUD does, so the
-            // dropdown never sits on top of the staff.
-            let drop = self
-                .top_bar
-                .topbar_expand_animation
-                .animate_bool(0.0, 75.0, ctx.frame_timestamp);
+            // At the top, ride down with the expanding top bar, as the HUD
+            // does, so the dropdown never sits on top of the staff. Dropped
+            // down, there is no top bar to dodge — it sits just above the
+            // keyboard instead, close enough to read without covering keys.
+            // Dropped down, there's room — and a reason, being close to the
+            // hands now — to read the strip bigger, so it also zooms in
+            // place from its own bottom edge.
+            let (y_offset, zoom) = if self.sheet_at_bottom {
+                (
+                    (self.keyboard.pos().y - SHEET_REPOSITION_GAP - sheet.height()).max(0.0),
+                    SHEET_REPOSITION_BOTTOM_ZOOM,
+                )
+            } else {
+                (
+                    self.top_bar.topbar_expand_animation.animate_bool(
+                        0.0,
+                        75.0,
+                        ctx.frame_timestamp,
+                    ),
+                    1.0,
+                )
+            };
             sheet.update(
                 ctx.window_state.physical_size,
                 ctx.window_state.scale_factor as f32,
                 time,
                 ctx.window_state.logical_size,
-                drop,
+                y_offset,
+                zoom,
             );
+
+            // Silent by default: nothing marks the strip as clickable until
+            // the cursor finds it, then an arrow says so — pointing the way
+            // the strip will move — and clicking anywhere on it sends it
+            // there. Reading sheet music well enough to want it isn't the
+            // common case, so the control stays out of the way of everyone
+            // else.
+            let rect = sheet.rect();
+            let event = nuon::click_area(nuon::Id::hash("sheet_reposition"))
+                .rect(rect)
+                .build(&mut self.nuon);
+
+            if event.is_clicked() {
+                self.sheet_at_bottom = !self.sheet_at_bottom;
+                ctx.config.set_sheet_music_bottom(self.sheet_at_bottom);
+                self.toast_manager.toast(if self.sheet_at_bottom {
+                    "Sheet Music: Moved to bottom"
+                } else {
+                    "Sheet Music: Moved to top"
+                });
+            }
+
+            if event.is_hovered() || event.is_pressed() {
+                let arrow_x = rect.origin.x + rect.size.width
+                    - SHEET_REPOSITION_ARROW_SIZE
+                    - SHEET_REPOSITION_ARROW_PAD;
+                let arrow_y = rect.origin.y + SHEET_REPOSITION_ARROW_PAD;
+                let [r, g, b] = SHEET_REPOSITION_ARROW_COLOR;
+                // Points the way a click sends the strip: down while it's at
+                // the top, up once it's already at the bottom.
+                let icon = if self.sheet_at_bottom {
+                    icons::caret_up()
+                } else {
+                    icons::caret_down()
+                };
+
+                nuon::label()
+                    .pos(arrow_x, arrow_y)
+                    .size(SHEET_REPOSITION_ARROW_SIZE, SHEET_REPOSITION_ARROW_SIZE)
+                    .icon(icon)
+                    .font_size(SHEET_REPOSITION_ARROW_SIZE)
+                    .text_justify(nuon::TextJustify::Center)
+                    .color(nuon::Color::new(r, g, b, 1.0))
+                    .build(&mut self.nuon);
+            }
         }
 
         self.update_glow(delta);

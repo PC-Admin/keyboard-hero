@@ -251,6 +251,14 @@ impl Config {
         self.waterfall.sheet_music
     }
 
+    pub fn set_sheet_music_bottom(&mut self, bottom: bool) {
+        self.waterfall.sheet_music_bottom = bottom;
+    }
+
+    pub fn sheet_music_bottom(&self) -> bool {
+        self.waterfall.sheet_music_bottom
+    }
+
     pub fn speed_multiplier(&self) -> f32 {
         self.playback.speed_multiplier
     }
