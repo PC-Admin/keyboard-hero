@@ -6,12 +6,38 @@ fn home() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn xdg_config() -> Option<PathBuf> {
+fn legacy_xdg_config() -> Option<PathBuf> {
     env::var_os("XDG_CONFIG_HOME")
         .filter(|h| !h.is_empty())
         .map(PathBuf::from)
         .map(|p| p.join("neothesia"))
         .or_else(|| home().map(|h| h.join(".config").join("neothesia")))
+}
+
+fn xdg_config() -> Option<PathBuf> {
+    let new_dir = env::var_os("XDG_CONFIG_HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
+        .map(|p| p.join("keyboard-hero"))
+        .or_else(|| home().map(|h| h.join(".config").join("keyboard-hero")))?;
+
+    // One-time copy-forward: keyboard-hero used to share Neothesia's config dir.
+    // Seed the new dir from it so existing settings survive the split, then the
+    // two dirs diverge independently.
+    if !new_dir.exists()
+        && let Some(legacy_dir) = legacy_xdg_config()
+        && legacy_dir.exists()
+    {
+        let _ = std::fs::create_dir_all(&new_dir);
+        for file in ["settings.ron", "default.sf2"] {
+            let src = legacy_dir.join(file);
+            if src.exists() {
+                let _ = std::fs::copy(&src, new_dir.join(file));
+            }
+        }
+    }
+
+    Some(new_dir)
 }
 
 pub fn default_sf2() -> Option<PathBuf> {
