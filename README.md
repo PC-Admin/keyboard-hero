@@ -27,6 +27,8 @@ sloppiness.
 For genuinely well-arranged piano MIDI, **[Betacustic's Patreon](https://www.patreon.com/betacustic)**
 is the recommendation — hand-made arrangements that are actually pleasant to play along to,
 which is exactly what this app needs. Well worth supporting if you get use out of this.
+Their [beginner-tagged posts](https://www.patreon.com/cw/betacustic/posts?filters%5Btag%5D=midi+beginner)
+are the easiest place to start.
 
 Other decent sources: [BitMidi](https://bitmidi.com/), [MuseScore](https://musescore.com/)
 (export to MIDI), or your own DAW.
