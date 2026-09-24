@@ -12,7 +12,7 @@ it's on Flathub and the AUR, and it's better maintained than this will ever be.
 
 ## Preview
 
-[![Keyboard Hero preview](https://img.youtube.com/vi/VYDLKnJNd3E/maxresdefault.jpg)](https://www.youtube.com/watch?v=VYDLKnJNd3E)
+[![Keyboard Hero preview](images/preview.jpg)](https://www.youtube.com/watch?v=VYDLKnJNd3E)
 
 *Click through for the video — HERO mode, hit effects and the results screen in motion.*
 
